@@ -581,3 +581,8 @@ Triage each one with the diagnostic steps above first, then:
 
 After repairing any documents, re-run `index`/`index-local` and restart the
 server so the corrected text is actually searchable.
+
+## License
+
+[MIT](LICENSE) - the assistant's own code. The underlying legal and fiscal
+documents it indexes remain subject to their original sources' terms.
