@@ -1,11 +1,21 @@
 # RDC Fiscal Reference Assistant
 
-A multi-source, citation-first RAG assistant for fiscal, legal, accounting,
-customs, monetary, and employment-reference documents in the `Scapper`
-repository.
+A citation-first RAG assistant for fiscal, legal, accounting, customs,
+monetary, and employment law in the Democratic Republic of Congo. Ask a
+question in French; every answer traces back to a specific law, article, and
+source document — never an uncited claim.
 
-The assistant does **not** train a model on the repository. It extracts
-page-aware text and maintains two retrieval paths:
+## Why this exists
+
+Fiscal and legal research in the DRC means cross-referencing dozens of
+scattered sources - Journaux Officiels, ministry communiqués, legislative
+aggregators - each with its own formatting, OCR quality, and duplication.
+This assistant unifies 18 institutional and legislative sources into one
+searchable, citation-backed reference, so a question gets an answer grounded
+in the actual text of the law rather than a plausible-sounding summary.
+
+The assistant does **not** train a model on the underlying documents. It
+extracts page-aware text and maintains two retrieval paths:
 
 - **Primary:** OpenAI hosted vector store and File Search.
 - **Fallback:** a local SQLite FTS5 index retrieves passages, then OpenRouter
@@ -14,6 +24,31 @@ page-aware text and maintains two retrieval paths:
 With `FISCAL_RAG_PROVIDER=auto`, OpenAI is used whenever its key and hosted
 index are ready. If OpenAI is unavailable or its request fails, the server
 temporarily switches to OpenRouter and the local index.
+
+## Features
+
+- **Citation-first answers** - every claim links to a specific document,
+  article, and (where available) the original online source, never the app's
+  local cache, and inline references are visually distinguished from prose in
+  both the chat UI and exported PDFs.
+- **Structured legal graph** - tracks which laws amend, repeal, or reference
+  each other at the instrument level and the article level, so a "is this
+  still in force?" question gets a deterministic, evidence-backed answer
+  instead of a model guess.
+- **Content-verified corpus deduplication** - the same law is often scraped
+  by several sources; documents are grouped and merged by actual text
+  similarity (not just matching titles, which this corpus's citation-heavy
+  titles make unreliable on their own), so near-duplicate copies stop
+  diluting search relevance.
+- **Resilient retrieval** - OpenAI-hosted File Search as primary, with
+  automatic fallback to a local BM25 index + OpenRouter reranking when the
+  primary provider is unavailable or a request fails.
+- **OCR-aware ingestion** - page-aware PDF extraction with Tesseract OCR
+  fallback for scanned documents, plus tooling to find and repair broken
+  extractions.
+- **Full conversation export** - client-side PDF generation of an entire
+  chat, with clickable links to the original online sources and a footer
+  crediting the export's origin.
 
 ## Included sources
 
