@@ -1,0 +1,10 @@
+.env
+rag_data/
+.rag_data/
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+temppytest_verify2/
+.DS_Store
+Thumbs.db

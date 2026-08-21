@@ -1,0 +1,166 @@
+{
+  "repository_root": "../..",
+  "sources": [
+    {
+      "id": "awa",
+      "label": "AWA-Afrika",
+      "description": "Lois, décrets, arrêtés, ordonnances et autres textes juridiques",
+      "paths": ["awa_scraper/downloads"],
+      "catalogs": ["awa_scraper/downloads/pdf_name_mapping.csv"],
+      "superseded": {
+        "code-des-impots.pdf": "version antérieure à 2012, régime ICA aboli; vérifier chaque règle contre le CODE DES IMPÔTS 2023",
+        "code_du_numerique.pdf": "proposition de loi (avant-projet); le texte adopté est l'Ordonnance-loi n° 23/010 du 13 mars 2023 portant Code du numérique"
+      },
+      "enabled": true
+    },
+    {
+      "id": "bcc",
+      "label": "Banque Centrale du Congo",
+      "description": "Réglementation bancaire, rapports et publications monétaires",
+      "paths": ["bcc_scraper/downloads"],
+      "catalogs": ["bcc_scraper/downloads/pdf_name_mapping.csv"],
+      "enabled": true
+    },
+    {
+      "id": "dgi",
+      "label": "Direction Générale des Impôts",
+      "description": "Documentation fiscale et administrative de la DGI",
+      "paths": ["dgi_scraper/dgi_pdfs_downloaded", "dgi_scraper/matched_pdfs"],
+      "catalogs": ["dgi_scraper/dgi_pdfs_downloaded/pdf_name_mapping.csv"],
+      "enabled": true
+    },
+    {
+      "id": "dgrad",
+      "label": "DGRAD",
+      "description": "Recettes administratives, judiciaires, domaniales et de participations",
+      "paths": ["dgrad_scraper/downloads"],
+      "catalogs": ["dgrad_scraper/downloads/pdf_name_mapping.csv"],
+      "enabled": true
+    },
+    {
+      "id": "finances",
+      "label": "Ministère des Finances",
+      "description": "Publications, adjudications, budgets et documents du ministère",
+      "paths": ["finances_scraper/downloads"],
+      "catalogs": ["finances_scraper/downloads/pdf_name_mapping.csv"],
+      "enabled": true
+    },
+    {
+      "id": "onecrdc",
+      "label": "ONEC-RDC",
+      "description": "Normes, communiqués et documentation de la profession comptable",
+      "paths": ["OneCRDC/OneCRDC_output", "OneCRDC/media"],
+      "catalogs": ["OneCRDC/data/processed/onecrdc_pdf_annuaire.csv"],
+      "enabled": true
+    },
+    {
+      "id": "onem",
+      "label": "ONEM",
+      "description": "Documentation liée à l'emploi et aux obligations sociales",
+      "paths": ["Onem/onem_documents_downloaded"],
+      "catalogs": [],
+      "enabled": true
+    },
+    {
+      "id": "cnss",
+      "label": "CNSS",
+      "description": "Caisse Nationale de Sécurité Sociale : lois et décrets, communiqués, formulaires employeur/travailleur et publications",
+      "paths": ["cnss/downloads"],
+      "catalogs": ["cnss/output/text_name_mapping_cnss.csv"],
+      "enabled": true
+    },
+    {
+      "id": "government_public_affairs",
+      "label": "Government & Public Affairs",
+      "description": "Dossiers opérationnels DGI, DGRAD, DGDA, CNSS, BCC, ONEM et administrations régionales",
+      "paths": ["%FISCAL_RAG_GPA_PATH%"],
+      "catalogs": [],
+      "extensions": [".pdf", ".docx", ".xlsx", ".xls", ".csv", ".txt"],
+      "review_extensions": [".xlsx", ".xls", ".csv"],
+      "review_all": true,
+      "enabled": true
+    },
+    {
+      "id": "leganews",
+      "label": "LegaNews",
+      "description": "Veille législative et réglementaire RDC (lois, décrets, arrêtés, circulaires)",
+      "paths": ["leganews/documents"],
+      "catalogs": ["leganews/documents/text_name_mapping.csv"],
+      "extensions": [".txt"],
+      "enabled": true
+    },
+    {
+      "id": "leganews_attachments",
+      "label": "LegaNews (annexes PDF)",
+      "description": "Annexes et pièces jointes PDF publiées avec les textes LegaNews",
+      "paths": ["leganews/documents"],
+      "catalogs": [],
+      "extensions": [".pdf"],
+      "enabled": true
+    },
+    {
+      "id": "scribd",
+      "label": "Scribd (Journaux Officiels)",
+      "description": "Journaux Officiels et textes légaux RDC partagés sur Scribd",
+      "paths": ["Scribd/Downloads"],
+      "catalogs": ["Scribd/output/text_name_mapping_scribd.csv"],
+      "enabled": true
+    },
+    {
+      "id": "leganet",
+      "label": "Leganet.cd",
+      "description": "Journaux Officiels et législation RDC (Leganet.cd)",
+      "paths": ["leganet/downloads"],
+      "catalogs": ["leganet/output/text_name_mapping_leganet.csv"],
+      "enabled": true
+    },
+    {
+      "id": "droitcongolais",
+      "label": "Droit Congolais",
+      "description": "Codes, lois, décrets, arrêtés et jurisprudence classés par matière (droitcongolais.info)",
+      "paths": ["droitcongolais/downloads"],
+      "catalogs": ["droitcongolais/output/text_name_mapping_droitcongolais.csv"],
+      "enabled": true
+    },
+    {
+      "id": "anicns",
+      "label": "ANICNS",
+      "description": "Textes de l'Agence Nationale de l'Industrie du Cobalt et autres Substances Minérales Stratégiques",
+      "paths": ["anicns/downloads"],
+      "catalogs": ["anicns/output/text_name_mapping_anicns.csv"],
+      "enabled": true
+    },
+    {
+      "id": "congomines",
+      "label": "Congo Mines",
+      "description": "Textes réglementaires du secteur minier RDC (congomines.org)",
+      "paths": ["congomines/downloads"],
+      "catalogs": ["congomines/output/text_name_mapping_congomines.csv"],
+      "enabled": true
+    },
+    {
+      "id": "faolex",
+      "label": "FAOLEX",
+      "description": "Textes RDC sur l'agriculture, les ressources naturelles et l'environnement (base FAOLEX)",
+      "paths": ["faolex/downloads"],
+      "catalogs": ["faolex/output/text_name_mapping_faolex.csv"],
+      "enabled": true
+    },
+    {
+      "id": "lextenso",
+      "label": "Lextenso",
+      "description": "Journaux Officiels et textes légaux RDC (Lextenso)",
+      "paths": ["lextenso/downloads"],
+      "catalogs": ["lextenso/output/text_name_mapping_lextenso.csv"],
+      "enabled": true
+    },
+    {
+      "id": "natlex",
+      "label": "NATLEX (OIT/ILO)",
+      "description": "Législation du travail et de la sécurité sociale RDC (base NATLEX de l'OIT)",
+      "paths": ["natlex/downloads"],
+      "catalogs": ["natlex/output/text_name_mapping_natlex.csv"],
+      "enabled": true
+    }
+  ]
+}
