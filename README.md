@@ -25,6 +25,21 @@ With `FISCAL_RAG_PROVIDER=auto`, OpenAI is used whenever its key and hosted
 index are ready. If OpenAI is unavailable or its request fails, the server
 temporarily switches to OpenRouter and the local index.
 
+## Before sharing
+
+The public repository is limited to implementation code and configuration
+templates. Keep API keys, `.env`, downloaded documents, extracted text,
+SQLite databases, chat history, generated reports, and internal source paths
+outside Git. See [SECURITY.md](SECURITY.md) for the minimum public-release and
+live-deployment boundary.
+
+Every push and pull request runs the Python tests, browser JavaScript syntax
+check, and whitespace validation through GitHub Actions.
+
+The repository also publishes a static, data-free interface preview through
+GitHub Pages at `https://zanestor.github.io/RAG-Fiscal-Assist/`. The preview
+does not connect to the assistant API and cannot query the private corpus.
+
 ## Features
 
 - **Citation-first answers** - every claim links to a specific document,
@@ -81,7 +96,16 @@ indicate identifiable individuals, employee, NIF, CNSS, or operational tax
 data. Review the contents, your authorization to process them, and your
 organization's data policy before opting in:
 
+The public repository contains implementation code and configuration templates
+only. Do not commit downloaded source documents, extracted text, SQLite
+databases, `state.json`, chat history, or generated review reports. The private
+Government & Public Affairs location is supplied locally through
+`FISCAL_RAG_GPA_PATH` in `.env`; it is intentionally absent from Git.
+
 ```powershell
+# Set this only in the local .env file before indexing the private source.
+FISCAL_RAG_GPA_PATH=C:\path\to\GOVERNMENT&PUBLIC_AFFAIRS
+
 python cli.py prepare --source government_public_affairs --include-review-required
 python cli.py index --source government_public_affairs --include-review-required
 ```

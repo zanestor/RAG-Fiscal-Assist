@@ -99,6 +99,11 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().casefold() in {"1", "true", "yes", "on"}
 
 
+def _resolve_config_path(repository_root: Path, value: str) -> Path:
+    expanded = Path(os.path.expandvars(value)).expanduser()
+    return (expanded if expanded.is_absolute() else repository_root / expanded).resolve()
+
+
 def get_settings(config_path: Path | None = None) -> Settings:
     load_dotenv(APP_DIR / ".env")
     config_path = config_path or APP_DIR / "config" / "sources.json"
@@ -115,8 +120,14 @@ def get_settings(config_path: Path | None = None) -> Settings:
                 id=str(item["id"]),
                 label=str(item.get("label", item["id"])),
                 description=str(item.get("description", "")),
-                paths=tuple((repository_root / value).resolve() for value in item.get("paths", [])),
-                catalogs=tuple((repository_root / value).resolve() for value in item.get("catalogs", [])),
+                paths=tuple(
+                    _resolve_config_path(repository_root, str(value))
+                    for value in item.get("paths", [])
+                ),
+                catalogs=tuple(
+                    _resolve_config_path(repository_root, str(value))
+                    for value in item.get("catalogs", [])
+                ),
                 enabled=bool(item.get("enabled", True)),
                 extensions=tuple(
                     extension if str(extension).startswith(".") else f".{extension}"

@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Assistant fiscal RDC fondé sur des sources documentaires citées">
   <title>Référence Fiscale RDC</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
   <script src="/vendor/jspdf.umd.min.js" defer></script>
   <script src="/app.js" defer></script>
@@ -20,7 +17,7 @@
       <span><strong>Référence Fiscale</strong><small>République Démocratique du Congo</small></span>
     </a>
     <div class="topbar-right">
-      <span class="model-badge" id="modelBadge">Modèle —</span>
+      <span class="model-badge" id="modelBadge">Recherche documentée</span>
       <span class="connection-status" id="connectionStatus"><i></i> Vérification…</span>
     </div>
   </header>
@@ -28,10 +25,10 @@
   <main class="app-shell">
     <aside class="sidebar">
       <section class="library-summary">
-        <span class="eyebrow">Base documentaire</span>
-        <div class="document-count"><strong id="documentCount">—</strong><span>documents<br>détectés</span></div>
+        <span class="eyebrow">Référentiel</span>
+        <div class="document-count"><strong id="documentCount">RDC</strong><span>sources<br>documentaires</span></div>
         <div class="summary-meter"><span id="indexMeter"></span></div>
-        <p id="indexSummary">Lecture de l’index local…</p>
+        <p id="indexSummary">Vérification des sources…</p>
       </section>
 
       <section class="source-section">
@@ -44,16 +41,16 @@
 
       <section class="history-section" id="historySection">
         <div class="section-heading">
-          <div><span class="eyebrow">Local · AppData</span><h2>Historique</h2></div>
+          <div><span class="eyebrow">Votre espace</span><h2>Historique</h2></div>
           <button id="refreshHistory" type="button">Actualiser</button>
         </div>
-        <p class="history-empty" id="historyEmpty">Aucune conversation sauvegardée.</p>
+        <p class="history-empty" id="historyEmpty">Vos conversations récentes apparaîtront ici.</p>
         <div id="historyList" class="history-list" aria-label="Historique local des conversations"></div>
       </section>
 
       <section class="safety-note">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.4c0 4.7 3.2 8.1 7.5 9.6 4.3-1.5 7.5-4.9 7.5-9.6V6L12 3Z"/><path d="m9 12 2 2 4-4"/></svg>
-        <div><strong>Réponse fondée sur les sources</strong><p>Vérifiez toujours l’entrée en vigueur et les modifications auprès de l’autorité compétente.</p></div>
+        <div><strong>Réponse fondée sur les sources</strong><p>Les citations sont séparées des données techniques et l’entrée en vigueur doit toujours être vérifiée.</p></div>
       </section>
     </aside>
 
@@ -87,21 +84,22 @@
       </div>
 
       <div id="welcomePanel" class="welcome-panel">
-        <div class="welcome-mark" aria-hidden="true"><span>§</span></div>
+        <div class="welcome-mark" aria-hidden="true"><span>📚</span></div>
         <h2>Que souhaitez-vous vérifier ?</h2>
         <p>Chaque réponse doit citer les documents retrouvés. L’assistant signale les contradictions et les informations manquantes.</p>
+        <span class="use-case-label">Cas d’usage courants</span>
         <div class="suggestion-grid">
           <button type="button" data-question="Quelles sont les principales obligations fiscales d’une ASBL en RDC ?">
-            <span class="suggestion-icon">01</span><strong>Obligations d’une ASBL</strong><small>Impôts, déclarations et pièces justificatives</small>
+            <span class="suggestion-icon" aria-hidden="true">🏢</span><strong>Obligations d’une ASBL</strong><small>Impôts, déclarations et pièces justificatives</small>
           </button>
           <button type="button" data-question="Explique le régime de la TVA en RDC et cite les articles applicables.">
-            <span class="suggestion-icon">02</span><strong>Régime de la TVA</strong><small>Taux, assiette, déduction et échéances</small>
+            <span class="suggestion-icon" aria-hidden="true">🧾</span><strong>Régime de la TVA</strong><small>Taux, assiette, déduction et échéances</small>
           </button>
           <button type="button" data-question="Quelles retenues fiscales s’appliquent aux prestataires de services ?">
-            <span class="suggestion-icon">03</span><strong>Retenues sur services</strong><small>Conditions, taux et obligations du redevable</small>
+            <span class="suggestion-icon" aria-hidden="true">🤝</span><strong>Retenues sur services</strong><small>Conditions, taux et obligations du redevable</small>
           </button>
           <button type="button" data-question="Quels documents récents concernent les marchés publics et leur fiscalité ?">
-            <span class="suggestion-icon">04</span><strong>Marchés publics</strong><small>Textes pertinents et dates documentaires</small>
+            <span class="suggestion-icon" aria-hidden="true">🏛️</span><strong>Marchés publics</strong><small>Textes pertinents et dates documentaires</small>
           </button>
         </div>
       </div>

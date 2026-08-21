@@ -11,6 +11,10 @@ const state = {
 
 const el = {};
 
+function isPublicDemo() {
+  return window.location.hostname.endsWith("github.io") || new URLSearchParams(window.location.search).get("demo") === "1";
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   ["modelBadge", "connectionStatus", "documentCount", "indexMeter", "indexSummary", "sourceFilters",
     "toggleSources", "setupPanel", "setupTitle", "setupMessage", "setupSteps", "welcomePanel", "messages",
@@ -52,6 +56,10 @@ function updateExportButton() {
 }
 
 async function loadStatus() {
+  if (isPublicDemo()) {
+    renderPublicDemo();
+    return;
+  }
   try {
     const response = await fetch("/api/status", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -65,15 +73,40 @@ async function loadStatus() {
   }
 }
 
+function renderPublicDemo() {
+  state.status = { ready_for_questions: false, searchable: 0, sources: [
+    { id: "fiscal", label: "Fiscalité RDC", description: "Impôts, TVA et obligations déclaratives", enabled: true },
+    { id: "social", label: "Travail & sécurité sociale", description: "Emploi, paie et protection sociale", enabled: true },
+    { id: "public", label: "Administration publique", description: "Marchés publics et réglementation", enabled: true },
+    { id: "legal", label: "Textes juridiques", description: "Lois, décrets et ordonnances", enabled: true },
+  ] };
+  el.modelBadge.textContent = "Aperçu public";
+  el.connectionStatus.className = "connection-status ready";
+  el.connectionStatus.innerHTML = "<i></i> Démonstration publique";
+  el.documentCount.textContent = "RDC";
+  el.indexMeter.style.width = "100%";
+  el.indexSummary.textContent = "Interface de recherche documentaire";
+  renderSources(state.status.sources);
+  showSetup(
+    "Aperçu public de l’interface",
+    "Cette page présente l’expérience de recherche sans exposer de documents, de base de données ou de clés privées.",
+    ["Explorez les cas d’usage proposés.", "La recherche en direct reste disponible dans l’installation privée.", "Les sources et citations apparaissent uniquement dans l’espace autorisé."],
+  );
+  setChatEnabled(false);
+}
+
 function renderStatus() {
   const status = state.status;
-  const providerLabel = status.active_provider === "openai" ? "OpenAI" : "OpenRouter secours";
-  el.modelBadge.textContent = `${providerLabel} · ${status.model}`;
-  el.documentCount.textContent = new Intl.NumberFormat("fr-FR").format(status.discovered);
+  const providerLabel = status.active_provider === "openai" ? "Recherche assistée" : "Recherche de secours";
+  el.modelBadge.textContent = providerLabel;
+  el.documentCount.textContent = "RDC";
   const searchable = status.searchable ?? status.indexed;
-  const ratio = status.discovered ? Math.round((searchable / status.discovered) * 100) : 0;
-  el.indexMeter.style.width = `${ratio}%`;
-  el.indexSummary.textContent = `${new Intl.NumberFormat("fr-FR").format(searchable)} recherchables · ${status.needs_ocr} à OCRiser · ${status.review_required || 0} à contrôler`;
+  el.indexMeter.style.width = status.ready_for_questions ? "100%" : searchable ? "62%" : "0%";
+  el.indexSummary.textContent = status.ready_for_questions
+    ? "Recherche documentaire active"
+    : searchable
+      ? "Référentiel en préparation"
+      : "Sources en attente de préparation";
   renderSources(status.sources || []);
 
   if (status.ready_for_questions) {
@@ -109,7 +142,7 @@ function renderSources(sources) {
     button.className = "source-filter selected";
     button.dataset.source = source.id;
     button.title = source.description;
-    button.innerHTML = `<span class="source-abbr">${escapeHTML(abbreviation(source.label))}</span><span><strong>${escapeHTML(source.label)}</strong><small>${formatNumber(source.document_count)} documents</small></span><span class="check">✓</span>`;
+    button.innerHTML = `<span class="source-abbr">${escapeHTML(abbreviation(source.label))}</span><span><strong>${escapeHTML(source.label)}</strong><small>Source documentaire</small></span><span class="check">✓</span>`;
     button.addEventListener("click", () => {
       if (state.selectedSources.has(source.id)) state.selectedSources.delete(source.id);
       else state.selectedSources.add(source.id);
@@ -219,11 +252,19 @@ function addAssistantMessage(answer, citations, model) {
   content.className = "answer-content";
   const meta = document.createElement("div");
   meta.className = "answer-meta";
-  meta.innerHTML = `<strong>Référence fiscale</strong><span>·</span><span>${escapeHTML(model)}</span>`;
+  meta.innerHTML = `<strong>Référence fiscale</strong><span>·</span><span>Réponse documentée</span>`;
   const text = renderMarkdown(answer);
   content.append(meta, text);
 
   if (citations.length) {
+    const verification = document.createElement("aside");
+    verification.className = "verification-card";
+    const institutions = new Set(citations.map((citation) => citation.source_label).filter(Boolean)).size;
+    const citationLabel = citations.length === 1 ? "1 source citée" : `${citations.length} sources citées`;
+    const institutionLabel = institutions === 1 ? "1 institution" : `${institutions} institutions`;
+    verification.innerHTML = `<div class="verification-heading"><span class="verification-icon" aria-hidden="true">🛡️</span><span><strong>Fiche de vérification</strong><small>Réponse appuyée par les références affichées</small></span></div><div class="verification-items"><span>📌 ${citationLabel}</span><span>🏛️ ${institutionLabel}</span><span>⚠️ Vérifier l’entrée en vigueur</span></div>`;
+    content.append(verification);
+
     const list = document.createElement("div");
     list.className = "citation-list";
     citations.forEach((citation, index) => {
