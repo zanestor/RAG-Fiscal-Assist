@@ -43,7 +43,7 @@ they support.
 At the end of the response, the assistant displays its verification card and
 the complete list of references used for the answer.
 
-![Verification summary and twelve references cited for the ASBL example](docs/assets/asbl-citations-example.png)
+![Verification summary and thirteen references cited for the ASBL example](docs/assets/asbl-citations-example.png)
 
 > [!NOTE]
 > This example was captured from the private development index on 25 August
