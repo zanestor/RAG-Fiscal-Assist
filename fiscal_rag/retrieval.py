@@ -10,6 +10,10 @@ from typing import Any, Iterable
 
 
 SCHEMA_VERSION = 2
+# Increment when chunk construction or retrieval semantics change without a
+# SQLite schema migration. The indexer records this per document so same-hash
+# content is rebuilt incrementally instead of retaining stale chunk boundaries.
+LOCAL_INDEX_REVISION = 4
 TARGET_CHUNK_CHARACTERS = 4_500
 MAX_QUERY_TERMS = 64
 DEFAULT_RESULT_LIMIT = 14
@@ -141,8 +145,17 @@ LOCATOR_PATTERN = re.compile(r"(?m)^##\s+(Page\s+\d+|Sheet:\s*[^\r\n]+|Section\s
 # "Article"/"ARTICLE" (not the re.I-matched lowercase "article") specifically to tell a
 # genuine header apart from an inline cross-reference like "conformement a l'article 12",
 # which French legal drafting convention always writes lowercase.
-ARTICLE_HEADER_PATTERN = re.compile(
-    r"\b(?:Article|ARTICLE)[ \t]+(1er|premier|\d+(?:[ \t]*(?:bis|ter|quater|quinquies|sexies|septies))?)\b"
+_ARTICLE_SUFFIXES = "bis|ter|quater|quinquies|sexies|septies"
+_ARTICLE_NUMBER_EXPRESSION = rf"(?i:1[ \t]*er|premier|\d+(?:[ \t-]*(?:{_ARTICLE_SUFFIXES}))?)"
+ARTICLE_HEADER_PATTERN = re.compile(rf"\b(?:Article|ARTICLE)[ \t]+({_ARTICLE_NUMBER_EXPRESSION})\b")
+ARTICLE_NUMBER_TOKEN_PATTERN = re.compile(_ARTICLE_NUMBER_EXPRESSION)
+ARTICLE_LIST_PATTERN = re.compile(
+    rf"\barticles?\s+({_ARTICLE_NUMBER_EXPRESSION}"
+    rf"(?:\s*(?:,|;|\bet\b|à|\ba\b|-)\s*{_ARTICLE_NUMBER_EXPRESSION})*)",
+    flags=re.UNICODE,
+)
+ARTICLE_CONTEXT_RESET_PATTERN = re.compile(
+    r"(?im)^\s*(?:annexes?|livre|titre|chapitre|section|sous-section|partie|table\s+des|canevas)\b"
 )
 
 # Recency-aware ranking: newer legal texts outrank older ones at similar
@@ -255,7 +268,7 @@ def _split_into_articles(text: str) -> list[tuple[str | None, str]]:
     for index, match in enumerate(matches):
         start = match.start()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        article_number = match.group(1).strip()
+        article_number = _normalize_article_number(match.group(1))
         segment_text = text[start:end].strip()
         if segment_text:
             segments.append((article_number, segment_text))
@@ -281,12 +294,31 @@ def chunk_extracted_text(text: str) -> list[tuple[str, str, str | None]]:
     )
 
     chunks: list[tuple[str, str, str | None]] = []
+    active_article: str | None = None
     for locator, section_text in sections:
-        for article_number, article_text in _split_into_articles(section_text):
+        article_segments = _split_into_articles(section_text)
+        if (
+            active_article
+            and article_segments
+            and article_segments[0][0] is None
+            and ARTICLE_CONTEXT_RESET_PATTERN.search(section_text[:1_000])
+        ):
+            # Page boundaries do not end an article, but a new structural unit
+            # does. In particular, the last article of a law must not label every
+            # following budget-annex table as if it were still that article.
+            active_article = None
+        for article_number, article_text in article_segments:
+            # A page boundary is an extraction artifact, not an article boundary.
+            # Text before the next header therefore continues the last article seen
+            # on the preceding page. This structured tag is especially important
+            # when the continuation itself does not repeat "Article N".
+            effective_article = article_number or active_article
+            if article_number is not None:
+                active_article = article_number
             parts = _split_large_section(article_text)
             for part, content in enumerate(parts, start=1):
                 part_locator = locator if len(parts) == 1 else f"{locator}, part {part}"
-                chunks.append((part_locator, content, article_number))
+                chunks.append((part_locator, content, effective_article))
     return chunks
 
 
@@ -318,24 +350,55 @@ def build_fts_query(question: str) -> str:
     return " OR ".join(f'"{term.replace(chr(34), "")}"*' for term in terms)
 
 
+def _normalize_article_number(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
+    normalized = re.sub(r"[\s-]+", " ", normalized)
+    if normalized == "premier" or re.fullmatch(r"1\s*er", normalized):
+        return "1er"
+    match = re.fullmatch(rf"(\d+)(?:\s*({_ARTICLE_SUFFIXES}))?", normalized)
+    if not match:
+        return normalized
+    number = str(int(match.group(1)))
+    return f"{number} {match.group(2)}" if match.group(2) else number
+
+
 def _requested_article_numbers(question: str) -> set[str]:
     normalized = unicodedata.normalize("NFKC", question).casefold()
     numbers: set[str] = set()
-    pattern = re.compile(r"\barticles?\s+(\d+(?:\s*(?:,|;|et|à|a|-)\s*\d+)*)", flags=re.UNICODE)
-    for match in pattern.finditer(normalized):
-        found = re.findall(r"\d+", match.group(1))
+    for match in ARTICLE_LIST_PATTERN.finditer(normalized):
+        found = [
+            _normalize_article_number(token.group())
+            for token in ARTICLE_NUMBER_TOKEN_PATTERN.finditer(match.group(1))
+        ]
         numbers.update(found)
-        if len(found) == 2 and re.search(r"(?:à|\ba\b|-)", match.group(1)):
+        if len(found) == 2 and all(value.isdigit() for value in found) and re.search(
+            r"(?:à|\ba\b|-)", match.group(1)
+        ):
             start, end = (int(value) for value in found)
             if 0 <= end - start <= 20:
                 numbers.update(str(value) for value in range(start, end + 1))
     return numbers
 
 
-def _article_reference_hits(content: str, requested: set[str]) -> int:
+def _article_reference_hits(content: str, requested: set[str], article_number: str | None = None) -> int:
     if not requested:
         return 0
-    found = set(re.findall(r"\barti\w{0,10}\s*[.:°º-]*\s*(\d+)\b", content.casefold(), flags=re.UNICODE))
+    reference_pattern = re.compile(
+        rf"\barti\w{{0,10}}\s*[.:°º-]*\s*({_ARTICLE_NUMBER_EXPRESSION})\b",
+        flags=re.UNICODE,
+    )
+    found = {
+        _normalize_article_number(match.group(1))
+        for match in reference_pattern.finditer(content.casefold())
+    }
+    if article_number and _normalize_article_number(article_number) in requested:
+        # A structured article tag is stronger evidence than incidental inline
+        # cross-references. Make it dominate even if another chunk cites every
+        # requested article in a table of contents or cross-reference list. All
+        # chunks belonging to that article tie here, leaving BM25 to choose its
+        # most relevant page instead of favoring only the page that repeats the
+        # article header.
+        return len(requested) + 1
     return len(found & requested)
 
 
@@ -395,12 +458,95 @@ def _match_informal_code_reference(question: str, state_documents: dict[str, dic
 # vs. 48-97 occurrences across this instrument's actual corpus candidates).
 _TOPIC_INSTRUMENTS: tuple[dict[str, Any], ...] = (
     {
-        "triggers": ("asbl", "association sans but lucratif", "associations sans but lucratif"),
+        # "a but non lucratif" (not "sans") is a common colloquial variant of
+        # the law's own wording - confirmed missed live: a real question
+        # phrased this way triggered neither this matcher nor an explicit
+        # instrument citation, and got no ASBL-law content at all.
+        "triggers": (
+            "asbl", "association sans but lucratif", "associations sans but lucratif",
+            "association a but non lucratif", "associations a but non lucratif",
+        ),
         "instrument_key": ("Loi", "4/2001"),
         "content_marker": "association",
         "min_mentions": 10,
     },
 )
+
+
+# Requires a separator (/, -, .) between digit groups so this never matches
+# a plain small number that just happens to appear in a question (an article
+# number, a year, an amount) - only something that already looks like this
+# corpus's own instrument-number format ("004/2001", "015-2002", "69.009" -
+# normalize_instrument_number() treats all three separators as equivalent).
+# The lookaround pair rejects a group that is part of a longer chain (a
+# French DD.MM.YYYY date such as "31.12.2025" is 3 digit groups; a real
+# instrument number here is always exactly 2), so an ordinary date in the
+# question is not mistaken for a bare instrument-number reference.
+_BARE_INSTRUMENT_NUMBER_PATTERN = re.compile(r"(?<!\d[/\-.])\b\d{1,4}[/\-.]\d{2,4}\b(?![/\-.]\d)")
+
+
+def _match_bare_number_against_recent_citations(
+    question: str,
+    state_documents: dict[str, dict[str, Any]],
+    recent_citations: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """A natural follow-up question ("004/2001, Article 47 ?") often names an
+    instrument only by a bare number, relying on it already being established
+    earlier in the conversation - a person would never repeat "Loi n
+    004/2001" in full on every turn. find_instrument_mentions() has no type
+    word to anchor on here and finds nothing. If the question's bare number
+    matches an instrument already cited earlier in this same conversation,
+    resolve it against that instrument instead of giving up - confirmed live:
+    a real question phrased exactly this way got "the text isn't in what I
+    retrieved" despite the instrument having been the main subject of the
+    conversation for several turns."""
+    from .legal_graph import normalize_instrument_number, parse_self_instrument
+
+    if not recent_citations:
+        return None
+    bare_numbers = {
+        normalize_instrument_number(match.group()) for match in _BARE_INSTRUMENT_NUMBER_PATTERN.finditer(question)
+    }
+    bare_numbers.discard("")
+    if not bare_numbers:
+        return None
+
+    # Confirm the bare number actually refers to something already discussed
+    # in this conversation - just enough to establish the (type_label,
+    # number_key) identity, not to pick which copy of it to use.
+    target_key: tuple[str, str] | None = None
+    for citation in recent_citations:
+        record = state_documents.get(str(citation.get("document_id") or ""))
+        if not record:
+            continue
+        mention = parse_self_instrument(str(record.get("title") or ""))
+        if mention is not None and mention.number_key in bare_numbers:
+            target_key = (mention.type_label, mention.number_key)
+            break
+    if target_key is None:
+        return None
+
+    # Search the whole corpus for this instrument rather than only the one
+    # copy that happened to be structurally cited last turn: that specific
+    # copy can itself be a short document that merely cites the real law in
+    # its own title (the same "Vu ..." trap dedup.py guards against) -
+    # confirmed live, where this returned a youth-sports-association permit
+    # decree instead of the actual law. Picking the largest matching copy
+    # corpus-wide, exactly like the explicit-citation path above, is far
+    # more likely to land on the genuine full text.
+    candidates = [
+        record
+        for record in state_documents.values()
+        if record.get("status") == "ready"
+        and record.get("present", True)
+        and not record.get("superseded_note")
+        and (mention := parse_self_instrument(str(record.get("title") or "")))
+        and (mention.type_label, mention.number_key) == target_key
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda record: record.get("character_count", 0), reverse=True)
+    return candidates[0]
 
 
 def _match_topic_instrument(question: str, state_documents: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
@@ -478,6 +624,7 @@ class LocalRetrievalIndex:
                     content TEXT NOT NULL,
                     article_number TEXT
                 );
+                CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     title,
                     content,
@@ -495,12 +642,32 @@ class LocalRetrievalIndex:
                 (str(SCHEMA_VERSION),),
             )
 
+    def document_content_hashes(self) -> dict[str, str]:
+        """Return what is actually present in the local index.
+
+        State-file flags can become stale after an interrupted or partial rebuild,
+        so reconciliation must inspect SQLite rather than treating those flags as
+        proof that a document is searchable. A missing or not-yet-initialized index
+        simply contains no documents; malformed/incompatible databases still raise
+        their SQLite error instead of being silently treated as healthy.
+        """
+        if not self.path.is_file():
+            return {}
+        with self._connect() as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'"
+            ).fetchone()
+            if table is None:
+                return {}
+            return {
+                str(row["document_id"]): str(row["content_hash"])
+                for row in connection.execute("SELECT document_id, content_hash FROM documents")
+            }
+
     def index_document(self, record: dict[str, Any]) -> int:
         extracted_path = Path(record["extracted_path"])
         text = extracted_path.read_text(encoding="utf-8", errors="replace")
         chunks = chunk_extracted_text(text)
-        if not chunks:
-            return 0
 
         self.ensure_schema()
         with self._connect() as connection:
@@ -514,6 +681,12 @@ class LocalRetrievalIndex:
             if old_ids:
                 connection.executemany("DELETE FROM chunks_fts WHERE rowid=?", ((chunk_id,) for chunk_id in old_ids))
             connection.execute("DELETE FROM chunks WHERE document_id=?", (record["id"],))
+            if not chunks:
+                # An extraction can become empty after OCR/cleanup is corrected.
+                # Keeping its previous document/chunk rows would serve evidence that
+                # no longer exists on disk, so clear all three tables atomically.
+                connection.execute("DELETE FROM documents WHERE document_id=?", (record["id"],))
+                return 0
             connection.execute(
                 """
                 INSERT INTO documents(document_id, title, source, source_label, category, published_date, source_url, content_hash)
@@ -591,7 +764,7 @@ class LocalRetrievalIndex:
         )
         sql = f"""
             SELECT
-                c.document_id, d.title, d.source, d.source_label, d.category,
+                c.chunk_id, c.document_id, d.title, d.source, d.source_label, d.category,
                 d.published_date, d.source_url, c.locator, c.content, c.article_number,
                 bm25(chunks_fts, 5.0, 1.0, 0.0, 0.0) AS score
             FROM chunks_fts
@@ -623,12 +796,12 @@ class LocalRetrievalIndex:
         requested_articles = _requested_article_numbers(question)
 
         with self._connect() as connection:
-            best_rank: dict[tuple[str, str], int] = {}
-            candidates: dict[tuple[str, str], sqlite3.Row] = {}
+            best_rank: dict[int, int] = {}
+            candidates: dict[int, sqlite3.Row] = {}
             for variant in [question, *(extra_queries or [])]:
                 variant_rows = self._fetch_candidates(connection, variant, sources, limit, requested_articles)
                 for rank, row in enumerate(variant_rows):
-                    key = (str(row["document_id"]), str(row["locator"]))
+                    key = int(row["chunk_id"])
                     if key not in best_rank or rank < best_rank[key]:
                         best_rank[key] = rank
                         candidates[key] = row
@@ -637,8 +810,12 @@ class LocalRetrievalIndex:
         rows = sorted(
             rows,
             key=lambda row: (
-                -_article_reference_hits(str(row["content"]), requested_articles) if requested_articles else 0,
-                best_rank[(str(row["document_id"]), str(row["locator"]))],
+                -_article_reference_hits(
+                    str(row["content"]), requested_articles, str(row["article_number"] or "")
+                )
+                if requested_articles
+                else 0,
+                best_rank[int(row["chunk_id"])],
                 _recency_adjusted_score(float(row["score"]), str(row["title"]), str(row["published_date"])),
             ),
         )
@@ -686,7 +863,7 @@ class LocalRetrievalIndex:
         terms, even with the rest of the corpus out of the way."""
         sql = """
             SELECT
-                c.document_id, d.title, d.source, d.source_label, d.category,
+                c.chunk_id, c.document_id, d.title, d.source, d.source_label, d.category,
                 d.published_date, d.source_url, c.locator, c.content, c.article_number,
                 bm25(chunks_fts, 5.0, 1.0, 0.0, 0.0) AS score
             FROM chunks_fts
@@ -709,16 +886,16 @@ class LocalRetrievalIndex:
                 per_variant_rows.append(
                     connection.execute(sql, (query, document_id, limit)).fetchall() if query else []
                 )
-        seen: set[str] = set()
+        seen: set[int] = set()
         rows: list[sqlite3.Row] = []
         position = 0
         while len(rows) < limit and any(position < len(variant_rows) for variant_rows in per_variant_rows):
             for variant_rows in per_variant_rows:
                 if position < len(variant_rows):
                     row = variant_rows[position]
-                    locator = str(row["locator"])
-                    if locator not in seen:
-                        seen.add(locator)
+                    chunk_id = int(row["chunk_id"])
+                    if chunk_id not in seen:
+                        seen.add(chunk_id)
                         rows.append(row)
                         if len(rows) >= limit:
                             break
@@ -777,6 +954,7 @@ class LocalRetrievalIndex:
         state_documents: dict[str, dict[str, Any]],
         max_documents: int = MAX_NAMED_INSTRUMENT_DOCUMENTS,
         extra_queries: list[str] | None = None,
+        recent_citations: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """When the question names a specific legal instrument, read it directly instead
         of relying solely on corpus-wide chunk ranking. Small enough documents are read
@@ -814,6 +992,12 @@ class LocalRetrievalIndex:
             if len(results) >= max_documents:
                 return results
 
+        if not results:
+            record = _match_bare_number_against_recent_citations(question, state_documents, recent_citations)
+            if record is not None:
+                entry = self._read_entry_for_record(question, record, extra_queries=extra_queries)
+                if entry is not None:
+                    results.append(entry)
         if not results:
             record = _match_informal_code_reference(question, state_documents)
             if record is not None:

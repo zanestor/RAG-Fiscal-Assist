@@ -148,6 +148,7 @@ def discover_documents(
             continue
         excluded = {normalize_filename(name) for name in source.excluded_filenames}
         superseded = {normalize_filename(name): note for name, note in source.superseded_filenames}
+        title_overrides = {normalize_filename(name): title.strip() for name, title in source.title_overrides}
         rows = catalog_rows(source)
         metadata: dict[str, dict[str, str]] = {}
         for row in rows:
@@ -193,7 +194,11 @@ def discover_documents(
                 seen_paths.add(path_key)
 
                 row = metadata.get(normalize_filename(resolved.name), {})
-                title = first_value(row, TITLE_FIELDS) or title_from_stem(resolved)
+                title = (
+                    title_overrides.get(normalize_filename(resolved.name))
+                    or first_value(row, TITLE_FIELDS)
+                    or title_from_stem(resolved)
+                )
                 superseded_note = superseded.get(normalize_filename(resolved.name), "")
                 if superseded_note and not title.startswith("[TEXTE OBSOLÈTE"):
                     title = f"[TEXTE OBSOLÈTE — {superseded_note}] {title}"

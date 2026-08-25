@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 temppytest_verify2/
 .pytest-run-temp/
+.pytest_tmp_index_reconcile*/
 .playwright-mcp/
 fiscal-assistant-public-ui.png
 *.sqlite3
@@ -15,7 +16,10 @@ state.json
 learned_notes.md
 extracted/
 tessdata/
+official_documents/budget/*.pdf
+official_documents/budget/*.part
 dedupe_review.html
+dedupe_review_*.html
 golden_eval_report.json
 Registre de Déduplication.mhtml
 .DS_Store

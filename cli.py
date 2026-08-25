@@ -20,6 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = subparsers.add_parser("prepare", help="Extract page-aware text locally; no API calls are made.")
     prepare.add_argument("--limit", type=int, default=None, help="Only prepare this many changed documents.")
     prepare.add_argument("--ocr", action="store_true", help="Try Tesseract OCR on pages with little extractable text.")
+    prepare.add_argument(
+        "--force-ocr", action="store_true",
+        help="Also OCR pages that already have 'enough' embedded text by length - use for a document known "
+        "to have a garbled/duplicated text layer (e.g. a pre-OCR'd source file), which --ocr alone will never "
+        "touch since it only OCRs pages that are too SHORT, not pages that are long but wrong. Implies --ocr; "
+        "always scope this with --source to a specific known-bad document, not a whole corpus re-run.",
+    )
     prepare.add_argument("--source", action="append", default=[], help="Only prepare a source ID; repeat for multiple sources.")
     prepare.add_argument("--include-review-required", action="store_true", help="Include files flagged for privacy/content review.")
     prepare.add_argument(
@@ -45,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index.add_argument("--limit", type=int, default=None, help="Only index this many changed documents.")
     index.add_argument("--ocr", action="store_true", help="Try Tesseract OCR on pages with little extractable text.")
+    index.add_argument(
+        "--force-ocr", action="store_true",
+        help="Also OCR pages that already have 'enough' embedded text by length - see 'prepare --force-ocr'.",
+    )
     index.add_argument("--source", action="append", default=[], help="Only index a source ID; repeat for multiple sources.")
     index.add_argument("--include-review-required", action="store_true", help="Upload files flagged for privacy/content review.")
     index.add_argument("--max-pages", type=int, default=None, help="Skip documents already known to have more than this many pages.")
@@ -192,7 +203,8 @@ def main() -> None:
             elif args.command == "prepare":
                 result = indexer.prepare(
                     limit=args.limit,
-                    use_ocr=args.ocr,
+                    use_ocr=args.ocr or args.force_ocr,
+                    force_ocr=args.force_ocr,
                     source_ids=set(args.source) or None,
                     include_review_required=args.include_review_required,
                     max_pages=args.max_pages,
@@ -202,7 +214,8 @@ def main() -> None:
             elif args.command == "index":
                 result = indexer.index(
                     limit=args.limit,
-                    use_ocr=args.ocr,
+                    use_ocr=args.ocr or args.force_ocr,
+                    force_ocr=args.force_ocr,
                     source_ids=set(args.source) or None,
                     include_review_required=args.include_review_required,
                     max_pages=args.max_pages,

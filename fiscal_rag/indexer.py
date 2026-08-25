@@ -1,18 +1,72 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 from pathlib import Path
 from typing import Any, Callable
 
 from .catalog import discover_documents
 from .config import Settings
-from .extractor import extract_document, sha256_file, validate_ocr_configuration
+from .extractor import (
+    extract_document,
+    header_lines,
+    refresh_extraction_header,
+    sha256_file,
+    validate_ocr_configuration,
+)
 from .legal_graph import LegalGraph
-from .retrieval import LocalRetrievalIndex
+from .retrieval import LOCAL_INDEX_REVISION, LocalRetrievalIndex
 from .state import load_state, save_state
 
 
 ProgressCallback = Callable[[str], None]
+LOCAL_STATE_SAVE_INTERVAL = 100
+
+
+def _flatten_duplicate_chains(documents: dict[str, dict[str, Any]]) -> int:
+    """Point every duplicate directly at its terminal canonical record.
+
+    Separate dedupe runs can legitimately choose a record as canonical and then
+    later discover that record is itself an exact duplicate of a better source.
+    Flattening preserves the audit trail while preventing citations and future
+    maintenance from stopping at an intermediate duplicate.
+    """
+    updates: dict[str, str] = {}
+    for document_id, record in documents.items():
+        initial_target = str(record.get("duplicate_of") or "")
+        if not initial_target:
+            continue
+        target = initial_target
+        visited = {document_id}
+        while target in documents and target not in visited:
+            visited.add(target)
+            next_target = str(documents[target].get("duplicate_of") or "")
+            if not next_target:
+                if target != initial_target:
+                    updates[document_id] = target
+                break
+            target = next_target
+        # Leave cycles and dangling targets untouched: silently guessing a
+        # canonical record would be more damaging than retaining a visible issue.
+    for document_id, target in updates.items():
+        documents[document_id]["duplicate_of"] = target
+    return len(updates)
+
+
+def _extraction_metadata_hash(record: dict[str, Any]) -> str:
+    """Fingerprint the catalog fields written into an extracted file's header."""
+    header = "\n".join(header_lines(record)).encode("utf-8")
+    return hashlib.sha256(header).hexdigest()
+
+
+def _legacy_extraction_header_matches(record: dict[str, Any], extracted_path: Path) -> bool:
+    """Check pre-fingerprint extractions without forcing a one-time corpus rebuild."""
+    expected_header = "\n".join(header_lines(record))
+    try:
+        with extracted_path.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(len(expected_header)) == expected_header
+    except OSError:
+        return False
 
 
 def _ocr_already_attempted(record: dict[str, Any]) -> bool:
@@ -23,7 +77,7 @@ def _ocr_already_attempted(record: dict[str, Any]) -> bool:
     )
 
 
-def _extract_worker(record: dict[str, Any], extracted_dir: Path, use_ocr: bool) -> dict[str, Any]:
+def _extract_worker(record: dict[str, Any], extracted_dir: Path, use_ocr: bool, force_ocr: bool = False) -> dict[str, Any]:
     """Runs in a worker process for --workers > 1: the CPU-bound extraction step only.
     Deliberately touches no shared state - self.state / state.json are only ever
     written by the parent process, sequentially, as each worker's result comes back,
@@ -33,7 +87,7 @@ def _extract_worker(record: dict[str, Any], extracted_dir: Path, use_ocr: bool) 
     path = Path(record["absolute_path"])
     try:
         content_hash = sha256_file(path)
-        extraction = extract_document(record, extracted_dir, use_ocr=use_ocr)
+        extraction = extract_document(record, extracted_dir, use_ocr=use_ocr, force_ocr=force_ocr)
         extracted_sha256 = sha256_file(Path(extraction["extracted_path"]))
         return {
             "id": record["id"],
@@ -41,6 +95,7 @@ def _extract_worker(record: dict[str, Any], extracted_dir: Path, use_ocr: bool) 
             "extraction": extraction,
             "sha256": content_hash,
             "extracted_sha256": extracted_sha256,
+            "prepared_metadata_hash": _extraction_metadata_hash(record),
             "size_bytes": record["size_bytes"],
             "mtime_ns": record["mtime_ns"],
             "ocr_attempted": bool(use_ocr and path.suffix.lower() == ".pdf"),
@@ -111,6 +166,7 @@ class FiscalIndexer:
             for document_id, record in known.items():
                 if record.get("source") in selected_source_ids:
                     record["present"] = document_id in discovered_ids
+        _flatten_duplicate_chains(known)
         save_state(self.settings.state_path, self.state)
         legal_graph = LegalGraph(self.settings.legal_graph_path)
         legal_graph.rebuild(known.values())
@@ -125,6 +181,7 @@ class FiscalIndexer:
         self,
         limit: int | None = None,
         use_ocr: bool = False,
+        force_ocr: bool = False,
         source_ids: set[str] | None = None,
         include_review_required: bool = False,
         max_pages: int | None = None,
@@ -138,22 +195,68 @@ class FiscalIndexer:
         records = self._eligible_records(source_ids, include_review_required)
         pending: list[tuple[int, dict[str, Any], Path]] = []
         skipped_by_page_filter = 0
+        metadata_hash_backfilled = False
+        metadata_headers_refreshed = 0
         for position, record in enumerate(records, start=1):
             path = Path(record["absolute_path"])
             ocr_already_attempted = _ocr_already_attempted(record)
-            unchanged = (
+            extracted_path_value = record.get("extracted_path")
+            extracted_path = Path(extracted_path_value) if extracted_path_value else None
+            current_metadata_hash = _extraction_metadata_hash(record)
+            stored_metadata_hash = record.get("prepared_metadata_hash")
+            metadata_unchanged = stored_metadata_hash == current_metadata_hash
+            if not stored_metadata_hash and extracted_path and extracted_path.is_file():
+                # State written before prepared_metadata_hash existed can be migrated
+                # without re-extracting every document. Comparing the actual header
+                # still catches a catalog correction made during this scan.
+                metadata_unchanged = _legacy_extraction_header_matches(record, extracted_path)
+                if metadata_unchanged:
+                    record["prepared_metadata_hash"] = current_metadata_hash
+                    metadata_hash_backfilled = True
+            source_unchanged = bool(
                 record.get("prepared_size") == record.get("size_bytes")
                 and record.get("prepared_mtime_ns") == record.get("mtime_ns")
-                and record.get("extracted_path")
-                and Path(record["extracted_path"]).is_file()
-                and not (
-                    use_ocr
-                    and not ocr_already_attempted
-                    and (
-                        record.get("status") in {"needs_ocr", "insufficient_text"}
-                        or bool(record.get("empty_pages"))
-                    )
+                and extracted_path
+                and extracted_path.is_file()
+            )
+            needs_ocr_retry = bool(
+                use_ocr
+                and not ocr_already_attempted
+                and (
+                    record.get("status") in {"needs_ocr", "insufficient_text"}
+                    or bool(record.get("empty_pages"))
                 )
+            )
+            # A metadata-only header refresh is still "changed document" work as
+            # far as --limit's documented contract goes ("Only prepare this many
+            # changed documents"), so it must count against the same budget as
+            # full re-extractions instead of running unbounded before limit is
+            # applied to `pending` below - otherwise a bulk catalog correction
+            # makes even `--limit 5` rewrite every changed document's header.
+            if (
+                not force_ocr
+                and source_unchanged
+                and not metadata_unchanged
+                and not needs_ocr_retry
+                and extracted_path
+            ):
+                if limit is not None and metadata_headers_refreshed >= limit:
+                    continue
+                if refresh_extraction_header(record, extracted_path):
+                    record["extracted_sha256"] = sha256_file(extracted_path)
+                    record["prepared_metadata_hash"] = current_metadata_hash
+                    metadata_headers_refreshed += 1
+                    processed += 1
+                    continue
+            # force_ocr always re-extracts, regardless of "unchanged" status:
+            # it exists specifically for a document whose status is already
+            # "ready" (enough embedded text by length) but whose text is
+            # actually garbled - the ordinary unchanged-skip would otherwise
+            # never let it be touched again.
+            unchanged = not force_ocr and (
+                source_unchanged
+                and metadata_unchanged
+                and not needs_ocr_retry
             )
             if unchanged:
                 continue
@@ -171,13 +274,20 @@ class FiscalIndexer:
                     skipped_by_page_filter += 1
                     continue
             pending.append((position, record, path))
+        if metadata_hash_backfilled or metadata_headers_refreshed:
+            save_state(self.settings.state_path, self.state)
+        if metadata_headers_refreshed:
+            self.progress(
+                f"Refreshed metadata headers for {metadata_headers_refreshed} document(s) without re-extracting their content."
+            )
         if skipped_by_page_filter:
             self.progress(
                 f"Page-count filter (max_pages={max_pages}, min_pages={min_pages}) deferred "
                 f"{skipped_by_page_filter} document(s) to a later run."
             )
 
-        selected = pending[:limit] if limit is not None else pending
+        selected = pending[: max(0, limit - metadata_headers_refreshed)] if limit is not None else pending
+        total_selected_work = metadata_headers_refreshed + len(selected)
         ocr_queue = [item for item in pending if item[2].suffix.lower() == ".pdf"] if use_ocr else []
         ocr_queue_positions = {record["id"]: position for position, (_, record, _) in enumerate(ocr_queue, start=1)}
         selected_ocr_count = sum(1 for _, _, path in selected if use_ocr and path.suffix.lower() == ".pdf")
@@ -199,7 +309,7 @@ class FiscalIndexer:
             # ever has a single writer, exactly as in the sequential path.
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(_extract_worker, record, self.settings.extracted_dir, use_ocr): (
+                    executor.submit(_extract_worker, record, self.settings.extracted_dir, use_ocr, force_ocr): (
                         library_position,
                         record,
                     )
@@ -212,6 +322,7 @@ class FiscalIndexer:
                         record.update(result_payload["extraction"])
                         record["sha256"] = result_payload["sha256"]
                         record["extracted_sha256"] = result_payload["extracted_sha256"]
+                        record["prepared_metadata_hash"] = result_payload["prepared_metadata_hash"]
                         record["prepared_size"] = result_payload["size_bytes"]
                         record["prepared_mtime_ns"] = result_payload["mtime_ns"]
                         record["indexed_content_hash"] = record.get("indexed_content_hash")
@@ -223,7 +334,7 @@ class FiscalIndexer:
                     if use_ocr and record["id"] in ocr_queue_positions:
                         ocr_progress = f"; OCR queue {ocr_queue_positions[record['id']]}/{len(ocr_queue)}"
                     self.progress(
-                        f"[{processed}/{len(selected)}] Extracted {record['source']}: {record['filename']} "
+                        f"[{processed}/{total_selected_work}] Extracted {record['source']}: {record['filename']} "
                         f"(library {library_position}/{len(records)}{ocr_progress}; {workers} workers)"
                     )
                     save_state(self.settings.state_path, self.state)
@@ -233,15 +344,17 @@ class FiscalIndexer:
                 if use_ocr and path.suffix.lower() == ".pdf":
                     ocr_progress = f"; OCR queue {ocr_queue_positions[record['id']]}/{len(ocr_queue)}"
                 self.progress(
-                    f"[{batch_position}/{len(selected)}] Extracting {record['source']}: {record['filename']} "
+                    f"[{metadata_headers_refreshed + batch_position}/{total_selected_work}] "
+                    f"Extracting {record['source']}: {record['filename']} "
                     f"(library {library_position}/{len(records)}{ocr_progress})"
                 )
                 try:
                     content_hash = sha256_file(path)
-                    extraction = extract_document(record, self.settings.extracted_dir, use_ocr=use_ocr)
+                    extraction = extract_document(record, self.settings.extracted_dir, use_ocr=use_ocr, force_ocr=force_ocr)
                     record.update(extraction)
                     record["sha256"] = content_hash
                     record["extracted_sha256"] = sha256_file(Path(record["extracted_path"]))
+                    record["prepared_metadata_hash"] = _extraction_metadata_hash(record)
                     record["prepared_size"] = record["size_bytes"]
                     record["prepared_mtime_ns"] = record["mtime_ns"]
                     record["indexed_content_hash"] = record.get("indexed_content_hash")
@@ -269,6 +382,7 @@ class FiscalIndexer:
         self,
         limit: int | None = None,
         use_ocr: bool = False,
+        force_ocr: bool = False,
         source_ids: set[str] | None = None,
         include_review_required: bool = False,
         max_pages: int | None = None,
@@ -278,6 +392,7 @@ class FiscalIndexer:
         self.prepare(
             limit=limit,
             use_ocr=use_ocr,
+            force_ocr=force_ocr,
             source_ids=source_ids,
             include_review_required=include_review_required,
             max_pages=max_pages,
@@ -341,17 +456,19 @@ class FiscalIndexer:
                 workers=workers,
             )
 
-        missing_ids = [
+        excluded_ids = [
             document_id
             for document_id, record in self.state["documents"].items()
-            if not record.get("present", True)
+            if not record.get("present", True) or record.get("duplicate_of")
         ]
-        if missing_ids:
-            self.local_index.remove_documents(missing_ids)
+        if excluded_ids:
+            self.local_index.remove_documents(excluded_ids)
 
         indexed = 0
         records = self._eligible_records(source_ids, include_review_required)
+        local_content_hashes = self.local_index.document_content_hashes()
         pending: list[tuple[int, dict[str, Any], Path, str]] = []
+        state_reconciled = False
         for position, record in enumerate(records, start=1):
             if record.get("status") != "ready":
                 continue
@@ -359,13 +476,39 @@ class FiscalIndexer:
             if not extracted_path.is_file():
                 continue
             extracted_content_hash = record.get("extracted_sha256") or record.get("sha256", "")
-            if (
-                record.get("local_indexed_content_hash") == extracted_content_hash
+            # A document that legitimately extracts to zero chunks has no row in
+            # SQLite's `documents` table (index_document() deletes it), so
+            # local_content_hashes never contains it - without this branch such a
+            # document would never match the primary skip condition below and
+            # would be re-attempted on every single run even though nothing about
+            # it has changed since the last (empty) result.
+            already_indexed_empty = (
+                extracted_content_hash
+                and record.get("local_chunk_count") == 0
+                and record.get("local_indexed_content_hash") == extracted_content_hash
+                and record.get("local_index_revision") == LOCAL_INDEX_REVISION
                 and record.get("local_indexed_superseded_note", "") == record.get("superseded_note", "")
-                and self.settings.local_index_path.is_file()
+            )
+            if already_indexed_empty or (
+                extracted_content_hash
+                and local_content_hashes.get(record["id"]) == extracted_content_hash
+                and record.get("local_index_revision") == LOCAL_INDEX_REVISION
+                and record.get("local_indexed_superseded_note", "") == record.get("superseded_note", "")
             ):
+                # SQLite is authoritative. Repair stale/missing state markers when
+                # the database itself already contains the current extracted text.
+                if (
+                    record.get("local_index_status") != "indexed"
+                    or record.get("local_indexed_content_hash") != extracted_content_hash
+                ):
+                    record["local_index_status"] = "indexed"
+                    record["local_indexed_content_hash"] = extracted_content_hash
+                    state_reconciled = True
                 continue
             pending.append((position, record, extracted_path, extracted_content_hash))
+
+        if state_reconciled:
+            save_state(self.settings.state_path, self.state)
 
         selected = pending[:limit] if limit is not None else pending
         for batch_position, (library_position, record, extracted_path, extracted_content_hash) in enumerate(
@@ -380,7 +523,15 @@ class FiscalIndexer:
             record["local_indexed_superseded_note"] = record.get("superseded_note", "")
             record["local_index_status"] = "indexed"
             record["local_chunk_count"] = chunk_count
-            save_state(self.settings.state_path, self.state)
+            record["local_index_revision"] = LOCAL_INDEX_REVISION
+            # SQLite commits each document atomically and is now the authoritative
+            # membership/hash source. Persisting a ~30 MB state.json after every
+            # one of 11k documents causes hundreds of GB of avoidable writes. A
+            # bounded checkpoint keeps interruption recovery cheap (at most this
+            # many rows are safely reprocessed) without turning state I/O into the
+            # dominant indexing cost.
+            if batch_position % LOCAL_STATE_SAVE_INTERVAL == 0 or batch_position == len(selected):
+                save_state(self.settings.state_path, self.state)
             indexed += 1
         return indexed
 
@@ -548,18 +699,61 @@ class FiscalIndexer:
             record["indexed_content_hash"] = None
             record["local_index_status"] = None
             record["local_indexed_content_hash"] = None
+            record["local_index_revision"] = None
             save_state(self.settings.state_path, self.state)
 
         self.local_index.remove_documents(duplicate_to_canonical.keys())
+        if _flatten_duplicate_chains(documents):
+            save_state(self.settings.state_path, self.state)
         return result
 
     def summary(self) -> dict[str, Any]:
         records = [record for record in self.state["documents"].values() if record.get("present", True)]
         default_ocr_records = [record for record in records if not record.get("requires_review")]
+        eligible_records = [
+            record
+            for record in records
+            if not record.get("duplicate_of")
+            and record.get("status") == "ready"
+            # A requires_review record only counts toward coverage once it has
+            # actually been indexed (via --include-review-required) - retrieval.py's
+            # search() doesn't filter on requires_review, so an indexed one is
+            # genuinely searchable and excluding it here would undercount real
+            # coverage and could wrongly report the assistant as not ready. An
+            # untouched requires_review record is still excluded, so it doesn't
+            # inflate the "missing" backlog before anyone has opted to index it.
+            and (
+                not record.get("requires_review")
+                or record.get("openai_file_id")
+                or record.get("local_index_revision") == LOCAL_INDEX_REVISION
+            )
+        ]
         by_source: dict[str, int] = {}
         for record in records:
             by_source[record.get("source", "unknown")] = by_source.get(record.get("source", "unknown"), 0) + 1
         local_stats = self.local_index.stats()
+        local_content_hashes = self.local_index.document_content_hashes()
+        local_covered = sum(
+            1
+            for record in eligible_records
+            if (expected_hash := (record.get("extracted_sha256") or record.get("sha256")))
+            and local_content_hashes.get(record["id"]) == expected_hash
+            and record.get("local_index_revision") == LOCAL_INDEX_REVISION
+        )
+        remote_covered = sum(
+            1
+            for record in eligible_records
+            if (expected_hash := (record.get("extracted_sha256") or record.get("sha256")))
+            and record.get("openai_file_id")
+            and record.get("indexed_content_hash") == expected_hash
+        )
+        eligible = len(eligible_records)
+        local_missing = eligible - local_covered
+        remote_missing = eligible - remote_covered
+
+        def coverage_percent(covered: int) -> float:
+            return round((covered / eligible) * 100, 2) if eligible else 0.0
+
         return {
             "discovered": len(records),
             "prepared": sum(1 for record in records if record.get("status") in {"ready", "needs_ocr", "insufficient_text"}),
@@ -578,8 +772,19 @@ class FiscalIndexer:
             "insufficient_text": sum(1 for record in records if record.get("status") == "insufficient_text"),
             "review_required": sum(1 for record in records if record.get("requires_review")),
             "errors": sum(1 for record in records if record.get("status") == "error"),
-            "indexed": sum(1 for record in records if record.get("index_status") == "indexed"),
-            "locally_indexed": local_stats["documents"],
+            # Keep the established names useful to server readiness checks, but base
+            # them on current canonical content rather than potentially stale flags.
+            "indexed": remote_covered,
+            "locally_indexed": local_covered,
+            "eligible": eligible,
+            "local_covered": local_covered,
+            "local_missing": local_missing,
+            "local_coverage_percent": coverage_percent(local_covered),
+            "remote_covered": remote_covered,
+            "remote_missing": remote_missing,
+            "remote_coverage_percent": coverage_percent(remote_covered),
+            "duplicates": sum(1 for record in records if record.get("duplicate_of")),
+            "local_index_documents": local_stats["documents"],
             "local_chunks": local_stats["chunks"],
             "local_index_path": str(self.settings.local_index_path),
             "vector_store_id": self.state.get("vector_store_id"),

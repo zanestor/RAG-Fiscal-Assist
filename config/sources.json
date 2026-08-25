@@ -2,6 +2,14 @@
   "repository_root": "../..",
   "sources": [
     {
+      "id": "budget_officiel",
+      "label": "Ministère du Budget",
+      "description": "Documents budgétaires officiels publiés par le Ministère du Budget de la RDC",
+      "paths": ["awa_scraper/fiscal_rag/official_documents/budget"],
+      "catalogs": ["awa_scraper/fiscal_rag/config/official_budget_documents.csv"],
+      "enabled": true
+    },
+    {
       "id": "awa",
       "label": "AWA-Afrika",
       "description": "Lois, décrets, arrêtés, ordonnances et autres textes juridiques",
@@ -27,6 +35,10 @@
       "description": "Documentation fiscale et administrative de la DGI",
       "paths": ["dgi_scraper/dgi_pdfs_downloaded", "dgi_scraper/matched_pdfs"],
       "catalogs": ["dgi_scraper/dgi_pdfs_downloaded/pdf_name_mapping.csv"],
+      "title_overrides": {
+        "code-des-impots_pdf.pdf": "Code des impôts — mis à jour au 31 mars 2021",
+        "CODE-DES-IMPOTS-2023.pdf": "Code des impôts — mis à jour au 10 juillet 2023"
+      },
       "enabled": true
     },
     {
@@ -43,6 +55,9 @@
       "description": "Publications, adjudications, budgets et documents du ministère",
       "paths": ["finances_scraper/downloads"],
       "catalogs": ["finances_scraper/downloads/pdf_name_mapping.csv"],
+      "title_overrides": {
+        "legislation_textes_reglementaires_code_des_impots_2021_5dfeb018a3.pdf": "Code des impôts — mis à jour au 31 mars 2021"
+      },
       "enabled": true
     },
     {
@@ -78,6 +93,22 @@
       "extensions": [".pdf", ".docx", ".xlsx", ".xls", ".csv", ".txt"],
       "review_extensions": [".xlsx", ".xls", ".csv"],
       "review_all": true,
+      "enabled": true
+    },
+    {
+      "id": "ohada",
+      "label": "OHADA / SYSCOHADA",
+      "description": "Actes uniformes, règlements et guides comptables OHADA/SYSCOHADA (droit comptable et information financière)",
+      "paths": ["%FISCAL_RAG_OHADA_PATH%"],
+      "catalogs": [],
+      "enabled": true
+    },
+    {
+      "id": "ong_ressources",
+      "label": "Ressources ONG",
+      "description": "Cadre légal, fiscalité, gouvernance et gestion administrative des ONG/ASBL en RDC (ressources de référence et documentation du Forum des ONGI)",
+      "paths": ["%FISCAL_RAG_ONG_RESSOURCES_PATH%", "%FISCAL_RAG_ONG_FORUM_PATH%"],
+      "catalogs": [],
       "enabled": true
     },
     {

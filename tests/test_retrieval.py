@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from fiscal_rag.retrieval import (
@@ -53,6 +54,34 @@ def test_chunks_tag_preamble_before_first_article_as_unspecified() -> None:
     ]
 
 
+def test_chunks_carry_article_suffix_across_page_boundaries() -> None:
+    chunks = chunk_extracted_text(
+        "## Page 4\n\nArticle 12 BIS : La garantie commence sur cette page.\n\n"
+        "## Page 5\n\nElle continue sans répéter son en-tête. "
+        "Article 12-ter : Une garantie distincte commence ensuite."
+    )
+
+    assert chunks == [
+        ("Page 4", "Article 12 BIS : La garantie commence sur cette page.", "12 bis"),
+        ("Page 5", "Elle continue sans répéter son en-tête.", "12 bis"),
+        ("Page 5", "Article 12-ter : Une garantie distincte commence ensuite.", "12 ter"),
+    ]
+
+
+def test_chunks_stop_carrying_last_article_into_annexes() -> None:
+    chunks = chunk_extracted_text(
+        "## Page 53\n\nArticle 88 : La loi entre en vigueur.\n\n"
+        "## Page 54\n\nANNEXES\n\n"
+        "## Page 55\n\nANNEXE I : SYNTHESE DU BUDGET 2026"
+    )
+
+    assert chunks == [
+        ("Page 53", "Article 88 : La loi entre en vigueur.", "88"),
+        ("Page 54", "ANNEXES", None),
+        ("Page 55", "ANNEXE I : SYNTHESE DU BUDGET 2026", None),
+    ]
+
+
 def test_builds_safe_prefix_query() -> None:
     assert build_fts_query("Quel est le taux de TVA ?") == '"taux"* OR "tva"*'
 
@@ -60,6 +89,12 @@ def test_builds_safe_prefix_query() -> None:
 def test_extracts_requested_article_numbers_and_ranges() -> None:
     assert _requested_article_numbers("Que prévoient les articles 31, 32 et 33 ?") == {"31", "32", "33"}
     assert _requested_article_numbers("Appliquer les articles 12 à 14") == {"12", "13", "14"}
+    assert _requested_article_numbers("Comparer les articles 1er, 12 bis, 12-ter et 13 quater") == {
+        "1er",
+        "12 bis",
+        "12 ter",
+        "13 quater",
+    }
 
 
 def test_long_eastern_drc_question_keeps_tax_terms_and_expands_synonyms() -> None:
@@ -149,6 +184,80 @@ def test_index_records_extracted_content_hash(tmp_path: Path) -> None:
             "SELECT content_hash FROM documents WHERE document_id=?", (record["id"],)
         ).fetchone()[0]
     assert stored_hash == "hash-of-ocr-text"
+
+
+def test_document_content_hashes_reflect_actual_index_membership(tmp_path: Path) -> None:
+    index = LocalRetrievalIndex(tmp_path / "retrieval.sqlite3")
+    assert index.document_content_hashes() == {}
+
+    record = make_record(
+        tmp_path,
+        "h" * 20,
+        "dgi",
+        "## Page 3\n\nArticle 7 : La déclaration est obligatoire.",
+    )
+    record["extracted_sha256"] = "current-extracted-hash"
+    index.index_document(record)
+
+    assert index.document_content_hashes() == {record["id"]: "current-extracted-hash"}
+
+    with sqlite3.connect(index.path) as connection:
+        index_names = {str(row[1]) for row in connection.execute("PRAGMA index_list('chunks')")}
+    assert "idx_chunks_document_id" in index_names
+
+
+def test_reindexing_empty_extraction_removes_stale_document_and_chunks(tmp_path: Path) -> None:
+    index = LocalRetrievalIndex(tmp_path / "retrieval.sqlite3")
+    record = make_record(
+        tmp_path,
+        "i" * 20,
+        "dgi",
+        "## Page 3\n\nArticle 7 : La déclaration est obligatoire.",
+    )
+    assert index.index_document(record) == 1
+
+    Path(str(record["extracted_path"])).write_text(" \n\n", encoding="utf-8")
+    assert index.index_document(record) == 0
+
+    assert index.stats() == {"documents": 0, "chunks": 0}
+    assert index.document_content_hashes() == {}
+
+
+def test_search_keeps_distinct_article_chunks_on_the_same_page(tmp_path: Path) -> None:
+    index = LocalRetrievalIndex(tmp_path / "retrieval.sqlite3")
+    record = make_record(
+        tmp_path,
+        "j" * 20,
+        "awa",
+        "## Page 10\n\nArticle 32 : Le certificat fiscal confirme la conformité. "
+        "Article 33 : Le certificat fiscal autorise la reprise.",
+    )
+    index.index_document(record)
+
+    results = index.search("certificat fiscal", limit=10)
+    scoped_results = index._search_within_document("certificat fiscal", str(record["id"]), limit=10)
+
+    assert {result.article_number for result in results} == {"32", "33"}
+    assert {result.article_number for result in scoped_results} == {"32", "33"}
+    assert {result.locator for result in results} == {"Page 10"}
+
+
+def test_structured_article_tag_outranks_incidental_cross_reference(tmp_path: Path) -> None:
+    index = LocalRetrievalIndex(tmp_path / "retrieval.sqlite3")
+    record = make_record(
+        tmp_path,
+        "k" * 20,
+        "awa",
+        "## Page 4\n\nArticle 12 bis : La règle commence ici.\n\n"
+        "## Page 5\n\nLa modalité ciblée poursuit cette règle. "
+        "Article 99 : La modalité ciblée renvoie à l'article 12 bis.",
+    )
+    index.index_document(record)
+
+    results = index.search("Quelle modalité prévoit l'article 12 bis ?", limit=10)
+
+    assert results[0].article_number == "12 bis"
+    assert any(result.article_number == "99" for result in results)
 
 
 def test_explicit_article_numbers_prioritize_matching_page(tmp_path: Path) -> None:

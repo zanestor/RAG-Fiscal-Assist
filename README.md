@@ -1,140 +1,239 @@
-# RDC Fiscal Reference Assistant
+<div align="center">
 
-A citation-first RAG assistant for fiscal, legal, accounting, customs,
-monetary, and employment law in the Democratic Republic of Congo. Ask a
-question in French; every answer traces back to a specific law, article, and
-source document — never an uncited claim.
+# Référence Fiscale RDC
+
+**Citation-first research for fiscal, legal, accounting, customs, monetary,
+and employment law in the Democratic Republic of Congo.**
+
+Ask in French. Retrieve the underlying text. Answer with document, article,
+page, and original-source citations.
+
+[![CI](https://github.com/zanestor/RAG-Fiscal-Assist/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zanestor/RAG-Fiscal-Assist/actions/workflows/ci.yml)
+[![Python 3.12 tested](https://img.shields.io/badge/Python-3.12%20tested-3776AB?logo=python&logoColor=white)](https://github.com/zanestor/RAG-Fiscal-Assist/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-0F766E.svg)](LICENSE)
+
+[**Explore the interface**](https://zanestor.github.io/RAG-Fiscal-Assist/)
+· [Quick start](#quick-start)
+· [Architecture](#how-retrieval-works)
+· [Security](SECURITY.md)
+
+</div>
+
+> [!IMPORTANT]
+> The public repository contains the application and configuration templates,
+> not the private document corpus, extracted evidence, indexes, API keys, or
+> chat history. The GitHub Pages experience is a static, data-free interface
+> preview and cannot answer questions.
+
+[![Data-free preview of the Référence Fiscale RDC interface](docs/assets/interface-preview.png)](https://zanestor.github.io/RAG-Fiscal-Assist/)
+
+<p align="center"><sub>Public preview mode — no corpus, database, or API credentials are exposed.</sub></p>
 
 ## Why this exists
 
-Fiscal and legal research in the DRC means cross-referencing dozens of
-scattered sources - Journaux Officiels, ministry communiqués, legislative
-aggregators - each with its own formatting, OCR quality, and duplication.
-This assistant unifies 18 institutional and legislative sources into one
-searchable, citation-backed reference, so a question gets an answer grounded
-in the actual text of the law rather than a plausible-sounding summary.
+Fiscal and legal research in the DRC means cross-referencing Journaux
+Officiels, ministry publications, professional libraries, and legislative
+aggregators with uneven formatting, OCR quality, metadata, and duplication.
+Référence Fiscale RDC turns those collections into one searchable evidence
+layer designed to ground material claims in the actual text of the law.
 
-The assistant does **not** train a model on the underlying documents. It
-extracts page-aware text and maintains two retrieval paths:
+The assistant does **not** train a model on the documents. It extracts
+page-aware evidence, builds searchable indexes, retrieves the smallest useful
+set of passages, and attaches traceable citations to the generated answer.
 
-- **Primary:** OpenAI hosted vector store and File Search.
-- **Fallback:** a local SQLite FTS5 index retrieves passages, then OpenRouter
-  sends only those passages to `openai/gpt-5.6-terra` for the answer.
+## What it brings together
 
-With `FISCAL_RAG_PROVIDER=auto`, OpenAI is used whenever its key and hosted
-index are ready. If OpenAI is unavailable or its request fails, the server
-temporarily switches to OpenRouter and the local index.
+| Capability | Practical value |
+| --- | --- |
+| **Citation-first answers** | Links substantive claims to a document, article, original PDF page, and online source when available. |
+| **Dual retrieval** | Uses OpenAI hosted File Search first and automatically falls back to local SQLite FTS5/BM25 retrieval with OpenRouter. |
+| **Legal relationship graph** | Tracks amendments, repeals, replacements, and article-level relationships separately from generative reasoning. |
+| **Legal-aware chunking** | Preserves article identity across pages and keeps distinct articles separate even when they share a PDF page. |
+| **OCR-aware ingestion** | Applies Tesseract only where embedded page text is insufficient and records unresolved pages for review. |
+| **Three-pass deduplication** | Detects byte-identical files, identical normalized evidence, and title candidates confirmed by content. |
+| **Resilient citations** | Keeps original-source links, mirror provenance, and page locators through local and hosted retrieval paths. |
+| **Private local history** | Stores conversations in a local SQLite database and supports full-chat PDF export with clickable sources. |
 
-## Before sharing
+## How retrieval works
 
-The public repository is limited to implementation code and configuration
-templates. Keep API keys, `.env`, downloaded documents, extracted text,
-SQLite databases, chat history, generated reports, and internal source paths
-outside Git. See [SECURITY.md](SECURITY.md) for the minimum public-release and
-live-deployment boundary.
+```mermaid
+flowchart LR
+    S[22 configured source collections] --> C[Catalog scan + metadata]
+    C --> E[Page-aware extraction]
+    E --> T{Enough embedded text?}
+    T -- No --> O[Tesseract OCR]
+    T -- Yes --> D[Content-verified deduplication]
+    O --> D
 
-Every push and pull request runs the Python tests, browser JavaScript syntax
-check, and whitespace validation through GitHub Actions.
+    D --> V[(OpenAI vector store)]
+    D --> F[(SQLite FTS5)]
+    D --> G[(Instrument + article graph)]
 
-The repository also publishes a static, data-free interface preview through
-GitHub Pages at `https://zanestor.github.io/RAG-Fiscal-Assist/`. The preview
-does not connect to the assistant API and cannot query the private corpus.
+    Q[Question] --> P{Provider mode: auto}
+    P -- Primary --> V
+    V --> FS[OpenAI File Search]
+    P -- Automatic fallback --> F
+    F --> B[BM25 candidates]
+    B --> L[LLM shortlist]
+    L --> R[BGE cross-encoder]
 
-## Features
-
-- **Citation-first answers** - every claim links to a specific document,
-  article, and (where available) the original online source, never the app's
-  local cache, and inline references are visually distinguished from prose in
-  both the chat UI and exported PDFs.
-- **Structured legal graph** - tracks which laws amend, repeal, or reference
-  each other at the instrument level and the article level, so a "is this
-  still in force?" question gets a deterministic, evidence-backed answer
-  instead of a model guess.
-- **Content-verified corpus deduplication** - the same law is often scraped
-  by several sources; documents are grouped and merged by actual text
-  similarity (not just matching titles, which this corpus's citation-heavy
-  titles make unreliable on their own), so near-duplicate copies stop
-  diluting search relevance.
-- **Resilient retrieval** - OpenAI-hosted File Search as primary, with
-  automatic fallback to a local BM25 index + OpenRouter reranking when the
-  primary provider is unavailable or a request fails.
-- **OCR-aware ingestion** - page-aware PDF extraction with Tesseract OCR
-  fallback for scanned documents, plus tooling to find and repair broken
-  extractions.
-- **Full conversation export** - client-side PDF generation of an entire
-  chat, with clickable links to the original online sources and a footer
-  crediting the export's origin.
-
-## Included sources
-
-- AWA-Afrika
-- Banque Centrale du Congo (BCC)
-- Direction Générale des Impôts (DGI)
-- DGRAD
-- Ministère des Finances
-- ONEC-RDC
-- ONEM
-- CNSS (Caisse Nationale de Sécurité Sociale)
-- LegaNews (veille législative — texte + annexes PDF)
-- Scribd (Journaux Officiels)
-- Leganet.cd (Journaux Officiels et législation)
-- Droit Congolais (droitcongolais.info — codes, lois, jurisprudence par matière)
-- ANICNS (Agence Nationale de l'Industrie du Cobalt et autres Substances Minérales Stratégiques)
-- Congo Mines (congomines.org)
-- FAOLEX (FAO — agriculture, ressources naturelles, environnement)
-- Lextenso (Journaux Officiels et textes légaux)
-- NATLEX (OIT/ILO — droit du travail et sécurité sociale)
-- Government & Public Affairs (external Rikolto document library)
-
-The external Government & Public Affairs source includes PDF, DOCX, XLSX,
-XLS, CSV, and TXT files. Images, videos, archives, scripts, and logs are
-intentionally excluded from the evidence index.
-
-For privacy, the complete external source is inventoried but flagged
-`requires_review` and skipped by extraction/upload by default. Some filenames
-indicate identifiable individuals, employee, NIF, CNSS, or operational tax
-data. Review the contents, your authorization to process them, and your
-organization's data policy before opting in:
-
-The public repository contains implementation code and configuration templates
-only. Do not commit downloaded source documents, extracted text, SQLite
-databases, `state.json`, chat history, or generated review reports. The private
-Government & Public Affairs location is supplied locally through
-`FISCAL_RAG_GPA_PATH` in `.env`; it is intentionally absent from Git.
-
-```powershell
-# Set this only in the local .env file before indexing the private source.
-FISCAL_RAG_GPA_PATH=C:\path\to\GOVERNMENT&PUBLIC_AFFAIRS
-
-python cli.py prepare --source government_public_affairs --include-review-required
-python cli.py index --source government_public_affairs --include-review-required
+    FS --> A[Citation-grounded answer]
+    R --> A
+    G --> A
 ```
 
+With `FISCAL_RAG_PROVIDER=auto`, the server uses OpenAI when a key and hosted
+index are ready. If that path is unavailable or fails, a circuit breaker
+temporarily routes questions through the private local index, optional LLM
+shortlisting, the multilingual `BAAI/bge-reranker-v2-m3` cross-encoder, and
+OpenRouter. Each reranking stage fails open to the preceding ranking.
+
+## Development corpus snapshot
+
+These figures describe one private development deployment on **24 August
+2026**. They are operational measurements, not data bundled with this
+repository.
+
+| Configured collections | Documents discovered | Eligible documents locally covered | Local retrieval chunks |
+| :---: | :---: | :---: | :---: |
+| **22** | **12,292** | **11,451 / 11,490 (99.66%)** | **378,245** |
+
+The same snapshot contains 3,677 legal instruments, 423 instrument-level
+relationships, 913 parsed articles, and 1,353 article-level relationships.
+
+## Quick start
+
+### Preview the interface without a corpus
+
+```powershell
+python -m http.server 8011 --bind 127.0.0.1 --directory static
+# Open http://127.0.0.1:8011/?demo=1
+```
+
+This is the same sanitized mode published to GitHub Pages. Search controls are
+intentionally disabled because no documents or API are connected.
+
+### Run the complete assistant on Windows
+
+1. Run `Setup Fiscal Assistant.cmd` to create `.venv`, install dependencies,
+   and create `.env` from the template.
+2. Configure at least one source folder in
+   [`config/sources.json`](config/sources.json), and add `OPENAI_API_KEY`
+   and/or `OPENROUTER_API_KEY` to `.env`.
+3. Build a five-document smoke index, inspect status, then start the server:
+
+   ```powershell
+   .\.venv\Scripts\python.exe cli.py index-local --limit 5
+   .\.venv\Scripts\python.exe cli.py status
+   .\.venv\Scripts\python.exe server.py
+   ```
+
+4. Open <http://127.0.0.1:8010>. Once the smoke test is sound, run
+   `python cli.py index` for all eligible documents and configured providers.
+
+The indexing pipeline checkpoints progress and is safe to resume. A fresh
+public clone will discover nothing until source documents or source paths are
+configured; this is intentional.
+
+## Repository guide
+
+| Path | Purpose |
+| --- | --- |
+| [`fiscal_rag/`](fiscal_rag) | Catalog, extraction, indexing, retrieval, reranking, legal graph, assistant, and history modules. |
+| [`static/`](static) | Responsive French web interface and data-free GitHub Pages preview. |
+| [`config/sources.json`](config/sources.json) | Source collection definitions, metadata catalogs, title overrides, and review gates. |
+| [`cli.py`](cli.py) | Corpus lifecycle, indexing, deduplication, graph, status, and learning commands. |
+| [`server.py`](server.py) | Local HTTP server for status, chat, history, and guarded document access. |
+| [`tests/`](tests) | Retrieval, extraction, deduplication, indexing, graph, API, and state regression tests. |
+| [`SECURITY.md`](SECURITY.md) | Public-repository and deployment security boundaries. |
+
+## Configured source collections
+
+The configuration currently defines **22 enabled collection feeds**. A feed
+is not necessarily a separate institution: for example, LegaNews text and
+attachments are indexed independently.
+
+<details>
+<summary><strong>See the configured collections</strong></summary>
+
+| Group | Collections |
+| --- | --- |
+| **Public authorities** | Ministère du Budget, Banque Centrale du Congo, DGI, DGRAD, Ministère des Finances, ONEC-RDC, ONEM, CNSS, ANICNS |
+| **Legal and professional sources** | AWA-Afrika, OHADA/SYSCOHADA, LegaNews, LegaNews attachments, Leganet.cd, Droit Congolais, Lextenso |
+| **International and specialist libraries** | NATLEX, FAOLEX, Congo Mines, Scribd Journaux Officiels |
+| **Curated document libraries** | Ressources ONG, Government & Public Affairs |
+
+</details>
+
+The external Government & Public Affairs collection supports PDF, DOCX,
+XLSX, XLS, CSV, and TXT evidence. It is inventory-visible but protected by a
+`review_all` gate: extraction and upload require an explicit
+`--include-review-required` opt-in after authorization and privacy review.
+Images, videos, archives, scripts, and logs are intentionally excluded.
+
+## Security and data boundary
+
+Keep `.env`, API keys, downloaded documents, extracted text, `state.json`,
+SQLite databases, chat history, generated reports, and internal paths outside
+Git. Private locations belong in environment variables such as
+`FISCAL_RAG_GPA_PATH`; see [SECURITY.md](SECURITY.md) before publishing or
+deploying the application.
+
+The included server binds to localhost and is intended for trusted local use.
+It is not a production internet deployment template: authentication, TLS,
+rate limiting, audit logging, and an approved retention policy are required
+before exposing a live corpus.
+
+Every push and pull request runs Python tests, a browser JavaScript syntax
+check, and whitespace validation through GitHub Actions.
+
+## Corpus operations
+
 Edit [`config/sources.json`](config/sources.json) to add another folder or
-catalog. Paths may be relative to the parent `Scapper` repository or absolute.
-Folders can be nested. CSV catalogs are optional; when present, common title,
-URL, category, filename, and date columns are detected automatically. Use an
-`extensions` list on a source to opt into non-PDF document types.
+catalog. Paths may be relative to the parent workspace or supplied through an
+environment variable. Folders can be nested. CSV catalogs are optional; when
+present, common title, URL, category, filename, and date columns are detected
+automatically. Use an `extensions` list to opt into non-PDF document types.
 
 ### Adding a new source, step by step
 
 This is the exact sequence used to bring a new scraper's output online (the
-`cnss` source was added this way):
+`cnss` source was added this way) or to point at an existing document folder
+that lives outside this workspace (the `ohada` source was added this way):
 
-1. **Place the scraped files** under a new folder directly inside `Scapper/`
-   (a sibling of `awa_scraper/`), e.g. `Scapper/cnss/downloads/`. PDFs can be
-   organized into category subfolders (`downloads/lois-et-decrets/`,
-   `downloads/communiques/`, ...) — the scan is recursive. If the scraper also
-   saves its own `.txt` sidecars (OCR/extraction byproducts, not a distinct
-   source of truth), leave the source's `extensions` at the default `[".pdf"]`
-   so they aren't double-indexed as separate documents.
+1. **Place or point at the files.** Two cases:
+   - **A scraper's output, inside `Scapper/`:** put it under a new folder
+     directly inside `Scapper/` (a sibling of `awa_scraper/`), e.g.
+     `Scapper/cnss/downloads/`. PDFs can be organized into category
+     subfolders (`downloads/lois-et-decrets/`, `downloads/communiques/`,
+     ...) — the scan is recursive. If the scraper also saves its own `.txt`
+     sidecars (OCR/extraction byproducts, not a distinct source of truth),
+     leave the source's `extensions` at the default `[".pdf"]` so they
+     aren't double-indexed as separate documents.
+   - **An existing folder outside this workspace** (a shared drive, another
+     OneDrive location, ...): do **not** hardcode its absolute path into
+     `config/sources.json` — that file is committed to the (now public)
+     repo, and a raw local path leaks your folder structure and username.
+     Instead add a placeholder env var, e.g. `FISCAL_RAG_OHADA_PATH=`, to
+     both `.env` (the real path) and `.env.example` (empty, documenting the
+     variable's existence), then reference it in `sources.json` as
+     `"paths": ["%FISCAL_RAG_OHADA_PATH%"]` — `_resolve_config_path()` in
+     `config.py` expands it at load time. This is the same pattern already
+     used for `government_public_affairs`.
 
 2. **(Optional) Point at a catalog CSV** if the scraper produced one with
    per-document metadata. `catalog.py` auto-detects common column names —
    `full_name`/`website_title`/`title`/`name` for the title, `pdf_filename`
    for the matching PDF, plus category/date/URL columns when present. This is
    what supplies each citation's real, clickable `source_url` (the online
-   original), not just the local file path.
+   original), not just the local file path. A source pointed at an external
+   folder with no catalog (like `ohada`) simply omits `catalogs` — citations
+   still work, they just won't have an online `source_url`.
+
+   If a catalog row is known to carry the parent web page's title instead of
+   the PDF's real title, add a filename-scoped `title_overrides` mapping to the
+   source configuration. Metadata-only corrections refresh the synthetic
+   extraction header without discarding an existing OCR evidence body.
 
 3. **Add an entry to `config/sources.json`**:
 
@@ -153,9 +252,14 @@ This is the exact sequence used to bring a new scraper's output online (the
    throughout the app and API. For a source needing privacy review before any
    document is uploaded (personal data, internal-only files), follow the
    `government_public_affairs` pattern instead: add `"review_all": true` and
-   list the extensions that need review under `"review_extensions"`.
+   list the extensions that need review under `"review_extensions"`. A folder
+   that mixes public reference material with what look like internal working
+   files (accounting spreadsheets, internal financial statements, training
+   slides) is exactly this case — leaving `extensions` at the PDF-only
+   default and reviewing before ever opting into `.xlsx`/`.docx`/`.pptx` is
+   the safe starting point, not an afterthought.
 
-4. **Bring it online** (from the `fiscal_rag` directory):
+4. **Bring it online** from the repository directory:
 
    ```powershell
    # Discover the new documents (also runs automatically at the start of prepare/index)
@@ -180,6 +284,12 @@ This is the exact sequence used to bring a new scraper's output online (the
    (or filter it from `/api/status`) until it restarts. Static frontend files
    (`static/*`) are served fresh from disk on every request and never need a
    restart.
+
+6. **Check for duplicates.** A new source often re-supplies laws already
+   present from other sources (or duplicates within itself — identical files
+   saved under different names). Run `python cli.py dedupe` (dry-run) after
+   indexing and review the preview before `--apply`; see "Deduplicating the
+   corpus" below.
 
 ### Removing a source
 
@@ -304,6 +414,11 @@ python cli.py prepare --ocr
 # Prepare and upload changed documents
 python cli.py index
 
+# Verify/synchronize the reviewed, hash-pinned official Budget 2026 documents
+python scripts/sync_official_budget_documents.py --dry-run
+python scripts/sync_official_budget_documents.py --check
+python scripts/sync_official_budget_documents.py
+
 # Build only the private local retrieval index used by OpenRouter
 python cli.py index-local
 
@@ -356,16 +471,42 @@ groups documents that are the same instrument, keeps one canonical copy (source
 priority - official/primary sources first - then extraction quality), and
 removes the rest from the local index and the OpenAI vector store.
 
-Grouping is title-based first (via the same instrument-identity parser used by
-the legal graph) but is **not** applied on title alone: many implementing
-decrees open their title with a citation to the base law they apply ("Loi n
-015/2002 ... Code du Travail, specialement en son article 169 ; Vu ..."), so
-title agreement alone would merge distinct documents. A second, content-based
-gate (word-shingle similarity, comparing each document's text from its first
-"Article" onward) confirms two candidates are actually the same writing before
-either is touched - calibrated to lean toward under-merging over over-merging,
-since an incorrect merge permanently deletes a document while an incorrect
-exclusion only leaves harmless redundancy in place.
+Three independent passes feed the same report, in order:
+
+1. **Exact match (sha256).** `find_exact_duplicate_groups()` groups
+   document_ids whose raw file content is byte-identical - literally the same
+   PDF saved under a different name, path, or source. No title parsing and no
+   similarity threshold: an exact hash match already proves identity, so this
+   is a zero-ambiguity signal. It exists because pass 2 below structurally
+   cannot catch this case - a document whose title doesn't follow the
+   corpus's "Type n DATE ..." citation convention (an informally named
+   upload, training material, a manually re-saved copy) never enters that
+   candidate pool at all, no matter how identical its content is to another
+   document's. Confirmed live: adding a source of manually-collected OHADA
+   accounting references surfaced 248 exact-duplicate groups (272 documents)
+   across the *entire* corpus - none of them title-parseable, none of them
+   caught by pass 3 - including copies that predated that source (the same
+   file re-scraped under different sources/names, e.g. an AWA copy and an
+   OHADA copy of the exact same PDF).
+
+2. **Exact extracted-evidence match.** Different PDF binaries can still
+   produce exactly the same normalized operative text (for example, a PDF
+   re-encoded by another website under a generic title). This pass strips the
+   pipeline metadata and compares exact normalized evidence, so it catches
+   those copies without using a fuzzy threshold. Similar but changed editions
+   remain separate.
+
+3. **Title + content match.** Title-based first (via the same
+   instrument-identity parser used by the legal graph) but **not** applied on
+   title alone: many implementing decrees open their title with a citation to
+   the base law they apply ("Loi n 015/2002 ... Code du Travail, specialement
+   en son article 169 ; Vu ..."), so title agreement alone would merge
+   distinct documents. A second, content-based gate (word-shingle similarity,
+   comparing each document's text from its first "Article" onward) confirms
+   two candidates are actually the same writing before either is touched -
+   calibrated to lean toward under-merging over over-merging, since an
+   incorrect merge permanently deletes a document while an incorrect
+   exclusion only leaves harmless redundancy in place.
 
 `--apply` is required to actually change anything; without it, `dedupe` only
 previews the groups it would act on - review that preview before running

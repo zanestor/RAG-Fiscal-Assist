@@ -38,6 +38,7 @@ class SourceConfig:
     review_all: bool = False
     excluded_filenames: tuple[str, ...] = ()
     superseded_filenames: tuple[tuple[str, str], ...] = ()
+    title_overrides: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,9 @@ def get_settings(config_path: Path | None = None) -> Settings:
                 excluded_filenames=tuple(str(value) for value in item.get("exclude", [])),
                 superseded_filenames=tuple(
                     (str(filename), str(note)) for filename, note in dict(item.get("superseded", {})).items()
+                ),
+                title_overrides=tuple(
+                    (str(filename), str(title)) for filename, title in dict(item.get("title_overrides", {})).items()
                 ),
             )
         )

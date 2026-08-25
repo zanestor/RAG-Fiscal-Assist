@@ -199,6 +199,42 @@ class ChatHistoryStore:
         turns = [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
         return turns
 
+    def recent_citations(self, conversation_id: str, max_exchanges: int = 4) -> list[dict[str, Any]]:
+        """Return the citations attached to recent assistant messages, most
+        recent first, deduplicated by document_id. Lets a follow-up question
+        that references an instrument only by a bare number ("004/2001") -
+        relying on it already being established earlier in the conversation,
+        the way a person naturally would - be resolved against whichever
+        document that number actually pointed to, instead of requiring the
+        full "Loi n 004/2001" citation to be repeated every turn."""
+        if not self.path.is_file() or not conversation_id:
+            return []
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT citations_json FROM messages
+                WHERE conversation_id=? AND role='assistant'
+                ORDER BY message_id DESC
+                LIMIT ?
+                """,
+                (conversation_id, max(0, max_exchanges)),
+            ).fetchall()
+        seen: set[str] = set()
+        citations: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                entries = json.loads(row["citations_json"])
+            except json.JSONDecodeError:
+                continue
+            for entry in entries:
+                document_id = entry.get("document_id")
+                if not document_id or document_id in seen:
+                    continue
+                seen.add(document_id)
+                citations.append(entry)
+        return citations
+
     def delete_conversation(self, conversation_id: str) -> bool:
         if not self.path.is_file():
             return False

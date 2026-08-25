@@ -25,3 +25,31 @@ def test_discovers_and_enriches_pdf(tmp_path: Path) -> None:
     assert documents[0]["source_url"] == "https://example.test/loi.pdf"
     assert len(documents[0]["id"]) == 20
 
+
+def test_filename_scoped_title_override_corrects_bad_catalog_metadata(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    original = settings.sources[0]
+    corrected_source = SourceConfig(
+        original.id,
+        original.label,
+        original.description,
+        original.paths,
+        original.catalogs,
+        original.enabled,
+        title_overrides=(("LOI.pdf", "Code des impôts — mis à jour au 10 juillet 2023"),),
+    )
+    corrected_settings = Settings(
+        settings.app_dir,
+        settings.repository_root,
+        settings.data_dir,
+        settings.static_dir,
+        (corrected_source,),
+        settings.model,
+        settings.reasoning_effort,
+        settings.port,
+        settings.api_key,
+    )
+
+    documents = discover_documents(corrected_settings)
+
+    assert documents[0]["title"] == "Code des impôts — mis à jour au 10 juillet 2023"

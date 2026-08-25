@@ -4,6 +4,7 @@ import openai
 
 import fiscal_rag.reranking as reranking_module
 from fiscal_rag.reranking import (
+    _candidate_preview,
     _parse_json_int_array,
     cross_encoder_rerank,
     llm_shortlist,
@@ -32,6 +33,18 @@ def test_parse_json_int_array_handles_various_formats() -> None:
     assert _parse_json_int_array('[1, "2", 3.0, true]') == [1, 2, 3]
     assert _parse_json_int_array("not json") == []
     assert _parse_json_int_array('{"not": "a list"}') == []
+
+
+def test_candidate_preview_keeps_opening_and_surfaces_late_query_evidence() -> None:
+    opening = "Définitions générales et procédure introductive. " * 12
+    evidence = "L'assiette fiscale ciblée bénéficie de la déduction spéciale."
+    content = opening + (" Obligation fiscale générale sans rapport." * 20) + evidence
+
+    preview = _candidate_preview("Quelle est l'assiette fiscale ciblée ?", content, limit=240)
+
+    assert preview.startswith("Définitions générales")
+    assert "assiette fiscale ciblée" in preview
+    assert len(preview) <= 240
 
 
 def test_llm_shortlist_returns_pool_unchanged_when_not_larger_than_target() -> None:

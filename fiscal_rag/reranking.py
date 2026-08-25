@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from typing import Any
 
 from .config import Settings
@@ -12,7 +14,23 @@ from .retrieval import RetrievedChunk
 # must happen once per process, never per query.
 RERANK_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 SHORTLIST_TARGET = 20
-CONTENT_PREVIEW_CHARACTERS = 400
+CONTENT_PREVIEW_CHARACTERS = 900
+PREVIEW_HEAD_CHARACTERS = 220
+_PREVIEW_STOPWORDS = {
+    "avec",
+    "cette",
+    "comment",
+    "dans",
+    "pour",
+    "quel",
+    "quelle",
+    "quelles",
+    "quels",
+    "selon",
+    "article",
+    "articles",
+    "prevoit",
+}
 
 LLM_SHORTLIST_PROMPT = """Tu es un assistant de recherche juridique pour la RDC (Republique Democratique du Congo). Voici une question et une liste numerotee de passages candidats (titre, repere, apercu). Selectionne les {target} passages les PLUS PERTINENTS pour repondre a la question - privilegie la pertinence reelle au contenu de la question plutot que la simple presence de mots-cles partages.
 
@@ -66,6 +84,75 @@ def _parse_json_int_array(raw: str) -> list[int]:
     return numbers
 
 
+def _normalized_preview_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(character for character in decomposed if not unicodedata.combining(character)).casefold()
+
+
+def _normalized_preview_text_with_map(value: str) -> tuple[str, list[int]]:
+    """Like _normalized_preview_text, but also returns a map from each output
+    character's index back to the index of the original character it came from.
+
+    NFKD decomposition and casefold() are not length-preserving (a ligature like
+    "ﬁ" expands to two characters, "ß".casefold() becomes "ss"), so a position
+    found in the normalized text does not line up with the same position in the
+    original string. Without this map, callers that search the normalized text
+    but slice the original one can silently read from the wrong offset."""
+    normalized_characters: list[str] = []
+    index_map: list[int] = []
+    for original_index, character in enumerate(value):
+        for piece in unicodedata.normalize("NFKD", character).casefold():
+            if unicodedata.combining(piece):
+                continue
+            normalized_characters.append(piece)
+            index_map.append(original_index)
+    return "".join(normalized_characters), index_map
+
+
+def _candidate_preview(question: str, content: str, limit: int = CONTENT_PREVIEW_CHARACTERS) -> str:
+    """Show the opening plus a window around substantive query terms.
+
+    Legal chunks can be several thousand characters long. Sending only their first
+    few hundred characters hides the operative sentence whenever an article starts
+    with definitions or procedural boilerplate. Keeping a short opening preserves
+    context while the query-centered window exposes the likely evidence.
+    """
+    compact = re.sub(r"\s+", " ", content).strip()
+    if len(compact) <= limit:
+        return compact
+
+    normalized_question = _normalized_preview_text(question)
+    query_terms = {
+        term
+        for term in re.findall(r"[^\W_]{4,}", normalized_question, flags=re.UNICODE)
+        if term not in _PREVIEW_STOPWORDS
+    }
+    normalized_content, content_index_map = _normalized_preview_text_with_map(compact)
+    matches = [
+        (normalized_content.count(term), normalized_content.find(term), term)
+        for term in query_terms
+        if normalized_content.find(term) >= PREVIEW_HEAD_CHARACTERS
+    ]
+    if not matches:
+        return compact[:limit]
+
+    head_size = min(PREVIEW_HEAD_CHARACTERS, max(0, limit // 3))
+    separator = " … "
+    if limit <= len(separator):
+        return compact[:limit]
+    window_size = max(0, limit - head_size - len(separator))
+    # A rare query term is usually more discriminating than a generic word such
+    # as "fiscal" that may occur throughout the passage.
+    _, focus_normalized, _ = min(matches)
+    # focus_normalized indexes into normalized_content; translate it back to the
+    # matching offset in compact (the string actually being sliced below).
+    focus = content_index_map[focus_normalized] if content_index_map else focus_normalized
+    window_start = max(head_size, focus - window_size // 3)
+    window_end = min(len(compact), window_start + window_size)
+    window_start = max(head_size, window_end - window_size)
+    return f"{compact[:head_size]}{separator}{compact[window_start:window_end]}"
+
+
 def llm_shortlist(
     question: str,
     candidates: list[RetrievedChunk],
@@ -88,7 +175,7 @@ def llm_shortlist(
         return candidates[:target]
 
     listing = "\n".join(
-        f"{index}. [{chunk.title} - {chunk.locator}] {chunk.content[:CONTENT_PREVIEW_CHARACTERS]}"
+        f"{index}. [{chunk.title} - {chunk.locator}] {_candidate_preview(question, chunk.content)}"
         for index, chunk in enumerate(candidates, start=1)
     )
     prompt = LLM_SHORTLIST_PROMPT.format(question=question, target=target, candidates=listing)

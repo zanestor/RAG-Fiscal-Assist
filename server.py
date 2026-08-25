@@ -151,11 +151,16 @@ class FiscalRequestHandler(BaseHTTPRequestHandler):
             conversation_id = ""
 
         history_messages: list[dict[str, str]] = []
+        recent_citations: list[dict[str, Any]] = []
         if SETTINGS.history_enabled and conversation_id:
             try:
                 history_messages = HISTORY.recent_turns(conversation_id)
             except Exception:
                 history_messages = []
+            try:
+                recent_citations = HISTORY.recent_citations(conversation_id)
+            except Exception:
+                recent_citations = []
 
         try:
             result = FiscalAssistant(SETTINGS).ask(
@@ -163,6 +168,7 @@ class FiscalRequestHandler(BaseHTTPRequestHandler):
                 sources=sources,
                 previous_response_id=previous_response_id,
                 history_messages=history_messages,
+                recent_citations=recent_citations,
             )
             if SETTINGS.history_enabled:
                 try:
@@ -223,8 +229,11 @@ class FiscalRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         if not requested.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
+            if CONVERSATION_ID_PATTERN.fullmatch(request_path.lstrip("/")):
+                requested = (SETTINGS.static_dir / "index.html").resolve()
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
         content = requested.read_bytes()
         media_type = mimetypes.guess_type(requested.name)[0] or "application/octet-stream"
         try:

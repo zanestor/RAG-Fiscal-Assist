@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from .legal_graph import parse_self_instrument
 # that show up throughout this corpus's scanned-PDF sources - a real quality
 # signal for which copy is safest to keep as canonical.
 SOURCE_PRIORITY: tuple[str, ...] = (
+    "budget_officiel",
     "scribd",
     "lextenso",
     "leganet",
@@ -170,6 +172,67 @@ def _is_same_document(doc_a: _ComparisonDoc, doc_b: _ComparisonDoc) -> bool:
     return intersection / union >= MIN_CONTENT_SIMILARITY
 
 
+def find_exact_duplicate_groups(documents: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    """Group document_ids whose raw file content is byte-identical (same
+    sha256) - the same PDF saved under a different name or path. This is a
+    zero-ambiguity signal, unlike the title+content-similarity path below: no
+    title parsing and no similarity threshold needed, because an exact hash
+    match already proves identity. It exists because that title-based path
+    structurally can't catch this case - a document whose title doesn't
+    follow the corpus's "Type n DATE ..." citation convention (an informally
+    named upload, training material, a manually-saved copy) never enters that
+    candidate pool at all, no matter how identical its content is to another
+    document's."""
+    groups: dict[str, list[str]] = {}
+    for document_id, record in documents.items():
+        if not record.get("present", True) or record.get("duplicate_of"):
+            continue
+        sha = record.get("sha256")
+        if not sha:
+            continue
+        groups.setdefault(sha, []).append(document_id)
+    return {sha: ids for sha, ids in groups.items() if len(ids) > 1}
+
+
+def find_exact_extracted_text_groups(documents: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    """Group different binaries that yield exactly the same operative evidence.
+
+    This catches re-encoded or rescanned copies with different PDF hashes and
+    non-parseable generic titles (for example, three copies named only "Code des
+    impôts"). Unlike the fuzzy title pass, exact normalized text cannot merge two
+    merely similar editions. Documents without usable extracted text are excluded.
+    """
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for document_id, record in documents.items():
+        if (
+            not record.get("present", True)
+            or record.get("duplicate_of")
+            or record.get("status") != "ready"
+            or not record.get("extracted_path")
+        ):
+            continue
+        candidates.append((document_id, record))
+
+    # Deliberately not pre-filtered by page_count: it's ingestion metadata, not
+    # part of the hashed operative text, so it can legitimately differ between
+    # two extractions of byte-identical text (a blank/cover page counted in one
+    # but not the other, missing/zero page_count). Pre-filtering on it would
+    # silently skip real duplicates, contradicting this pass's "exact text, no
+    # fuzzy threshold" guarantee.
+    groups: dict[str, list[str]] = {}
+    for document_id, record in candidates:
+        try:
+            raw = Path(str(record["extracted_path"])).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        operative = _operative_text(raw)
+        if len(operative) < 200:
+            continue
+        fingerprint = hashlib.sha256(operative.encode("utf-8")).hexdigest()
+        groups.setdefault(fingerprint, []).append(document_id)
+    return {fingerprint: ids for fingerprint, ids in groups.items() if len(ids) > 1}
+
+
 def find_duplicate_groups(documents: dict[str, dict[str, Any]]) -> dict[tuple[str, str], list[str]]:
     """Group document_ids that share the same title-anchored legal instrument
     identity, using legal_graph's title parser so a document only joins a group
@@ -260,10 +323,60 @@ class DedupeReport:
 
 
 def plan_dedupe(documents: dict[str, dict[str, Any]]) -> DedupeReport:
-    title_groups = find_duplicate_groups(documents)
     previews: list[DedupeGroupPreview] = []
     documents_marked = 0
     documents_excluded = 0
+
+    # Pass 1: exact byte-for-byte duplicates need no verification - an exact
+    # hash match already proves identity, so these are resolved before (and
+    # independently of) the title-based candidate pool below.
+    already_resolved: set[str] = set()
+    for sha, document_ids in find_exact_duplicate_groups(documents).items():
+        canonical_id = select_canonical(document_ids, documents)
+        duplicate_ids = [doc_id for doc_id in document_ids if doc_id != canonical_id]
+        documents_marked += len(duplicate_ids)
+        already_resolved.update(document_ids)
+        previews.append(
+            DedupeGroupPreview(
+                type_label="Exact match (sha256)",
+                number_key=sha[:12],
+                canonical_id=canonical_id,
+                canonical_title=documents[canonical_id].get("title", ""),
+                canonical_source=documents[canonical_id].get("source", ""),
+                duplicate_ids=duplicate_ids,
+                excluded_ids=[],
+            )
+        )
+
+    # Pass 2: exact normalized operative text. This remains a zero-ambiguity
+    # merge signal while catching different PDF encodings and generic titles.
+    unresolved_documents = {
+        document_id: record for document_id, record in documents.items() if document_id not in already_resolved
+    }
+    for fingerprint, document_ids in find_exact_extracted_text_groups(unresolved_documents).items():
+        canonical_id = select_canonical(document_ids, documents)
+        duplicate_ids = [doc_id for doc_id in document_ids if doc_id != canonical_id]
+        documents_marked += len(duplicate_ids)
+        already_resolved.update(document_ids)
+        previews.append(
+            DedupeGroupPreview(
+                type_label="Exact extracted text",
+                number_key=fingerprint[:12],
+                canonical_id=canonical_id,
+                canonical_title=documents[canonical_id].get("title", ""),
+                canonical_source=documents[canonical_id].get("source", ""),
+                duplicate_ids=duplicate_ids,
+                excluded_ids=[],
+            )
+        )
+
+    # Pass 3: title-anchored candidates + content verification, for anything
+    # not already resolved above.
+    title_groups = {
+        key: [doc_id for doc_id in ids if doc_id not in already_resolved]
+        for key, ids in find_duplicate_groups(documents).items()
+    }
+    title_groups = {key: ids for key, ids in title_groups.items() if len(ids) > 1}
     doc_cache: dict[str, _ComparisonDoc] = {}
 
     def comparison_doc(document_id: str) -> _ComparisonDoc:

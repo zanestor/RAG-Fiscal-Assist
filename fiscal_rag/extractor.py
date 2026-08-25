@@ -10,6 +10,7 @@ from typing import Any
 
 MIN_PAGE_CHARACTERS = 40
 MIN_DOCUMENT_CHARACTERS = 200
+HEADER_END_MARKER = "Do not infer legal force, effective date, amendment, or repeal status from the catalog date alone."
 
 
 def ocr_configuration() -> tuple[str, Path]:
@@ -69,10 +70,33 @@ def header_lines(document: dict[str, Any]) -> list[str]:
     lines.extend(
         [
             "",
-            "Do not infer legal force, effective date, amendment, or repeal status from the catalog date alone.",
+            HEADER_END_MARKER,
         ]
     )
     return lines
+
+
+def refresh_extraction_header(document: dict[str, Any], extracted_path: Path) -> bool:
+    """Update catalog metadata without touching the extracted/OCR evidence body.
+
+    Returns ``False`` for an unfamiliar legacy file so the caller can fall back to
+    a normal extraction. Every extraction created by this pipeline starts with the
+    synthetic header and fixed trailer validated here.
+    """
+    try:
+        content = extracted_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not content.startswith("# Fiscal reference source"):
+        return False
+    marker_start = content.find(HEADER_END_MARKER)
+    if marker_start == -1:
+        return False
+    body_start = marker_start + len(HEADER_END_MARKER)
+    updated = "\n".join(header_lines(document)) + content[body_start:]
+    if updated != content:
+        extracted_path.write_text(updated, encoding="utf-8")
+    return True
 
 
 def output_path_for(document: dict[str, Any], output_dir: Path) -> Path:
@@ -103,7 +127,7 @@ def write_text_extraction(
     }
 
 
-def extract_pdf(document: dict[str, Any], output_dir: Path, use_ocr: bool = False) -> dict[str, Any]:
+def extract_pdf(document: dict[str, Any], output_dir: Path, use_ocr: bool = False, force_ocr: bool = False) -> dict[str, Any]:
     try:
         import fitz  # PyMuPDF
     except ImportError as error:
@@ -138,7 +162,17 @@ def extract_pdf(document: dict[str, Any], output_dir: Path, use_ocr: bool = Fals
         for page_index, page in enumerate(pdf):
             page_number = page_index + 1
             text = page.get_text("text", sort=True).strip()
-            if len(text) < MIN_PAGE_CHARACTERS and use_ocr:
+            # force_ocr exists for a different failure mode than the normal
+            # "page has too little text" check below: a PDF whose embedded
+            # text layer is long enough to pass that check but is garbled
+            # (duplicated words, mis-encoded accents - seen in a pre-OCR'd
+            # source file added to this corpus) never gets re-OCR'd otherwise,
+            # since length alone looks fine. force_ocr skips that length gate
+            # and, since the existing text is known bad, trusts the fresh OCR
+            # result outright rather than only keeping it if it's longer -
+            # duplicated garbage text is often LONGER than the correct text,
+            # so a length comparison would wrongly keep the garbage.
+            if (force_ocr or len(text) < MIN_PAGE_CHARACTERS) and use_ocr:
                 pixel_width = round(page.rect.width * 150 / 72)
                 pixel_height = round(page.rect.height * 150 / 72)
                 if pixel_width < 3 or pixel_height < 3:
@@ -154,7 +188,14 @@ def extract_pdf(document: dict[str, Any], output_dir: Path, use_ocr: bool = Fals
                             tessdata=str(tessdata_dir),
                         )
                         ocr_text = page.get_text("text", textpage=text_page, sort=True).strip()
-                        if len(ocr_text) > len(text):
+                        # Trust a forced OCR result outright (even if shorter than
+                        # duplicated-garbage embedded text) UNLESS it's so short it
+                        # looks like OCR itself failed (missing tessdata language, a
+                        # blank scan) - in that case keep the existing text rather
+                        # than replacing something readable with near-nothing.
+                        if (force_ocr and (len(ocr_text) >= MIN_PAGE_CHARACTERS or len(ocr_text) > len(text))) or (
+                            not force_ocr and len(ocr_text) > len(text)
+                        ):
                             text = ocr_text
                             ocr_pages.append(page_number)
                     except Exception as error:
@@ -260,10 +301,10 @@ def extract_xls(document: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     return write_text_extraction(document, output_dir, sections, "Sheet names and row numbers below identify locations in the original workbook.")
 
 
-def extract_document(document: dict[str, Any], output_dir: Path, use_ocr: bool = False) -> dict[str, Any]:
+def extract_document(document: dict[str, Any], output_dir: Path, use_ocr: bool = False, force_ocr: bool = False) -> dict[str, Any]:
     extension = Path(document["absolute_path"]).suffix.lower()
     if extension == ".pdf":
-        return extract_pdf(document, output_dir, use_ocr=use_ocr)
+        return extract_pdf(document, output_dir, use_ocr=use_ocr, force_ocr=force_ocr)
     if extension == ".docx":
         return extract_docx(document, output_dir)
     if extension == ".xlsx":

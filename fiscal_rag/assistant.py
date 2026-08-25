@@ -308,6 +308,7 @@ class FiscalAssistant:
         sources: list[str] | None = None,
         previous_response_id: str | None = None,
         history_messages: list[dict[str, str]] | None = None,
+        recent_citations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         # Computed once and shared across providers/fallback: repeating it per attempt
         # would double the cost and latency without adding value.
@@ -315,9 +316,9 @@ class FiscalAssistant:
 
         provider = self.settings.provider
         if provider == "openai":
-            return self._ask_openai(question, sources, previous_response_id, search_queries)
+            return self._ask_openai(question, sources, previous_response_id, search_queries, recent_citations)
         if provider == "openrouter":
-            return self._ask_openrouter(question, sources, history_messages, search_queries)
+            return self._ask_openrouter(question, sources, history_messages, search_queries, recent_citations)
 
         global _openai_unavailable_reason, _openai_unavailable_until
         state = load_state(self.settings.state_path)
@@ -328,7 +329,7 @@ class FiscalAssistant:
         )
         if openai_configured:
             try:
-                return self._ask_openai(question, sources, previous_response_id, search_queries)
+                return self._ask_openai(question, sources, previous_response_id, search_queries, recent_citations)
             except Exception as error:
                 if not self.settings.fallback_enabled:
                     raise
@@ -337,7 +338,7 @@ class FiscalAssistant:
 
         if not self.settings.fallback_enabled:
             raise RuntimeError("The OpenAI primary provider is not ready and fallback is disabled.")
-        result = self._ask_openrouter(question, sources, history_messages, search_queries)
+        result = self._ask_openrouter(question, sources, history_messages, search_queries, recent_citations)
         result["fallback_used"] = True
         result["fallback_from"] = "openai"
         if _openai_unavailable_reason:
@@ -350,6 +351,7 @@ class FiscalAssistant:
         sources: list[str] | None,
         previous_response_id: str | None,
         search_queries: list[str] | None = None,
+        recent_citations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.settings.api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured.")
@@ -381,7 +383,7 @@ class FiscalAssistant:
             instructions = f"{instructions}\n{legal_block}\n"
 
         focused_reading = LocalRetrievalIndex(self.settings.local_index_path).resolve_named_instrument_text(
-            question, state.get("documents", {}), extra_queries=search_queries
+            question, state.get("documents", {}), extra_queries=search_queries, recent_citations=recent_citations
         )
         focused_block = _focused_reading_block(focused_reading)
         hints_block = _search_hints_block(search_queries)
@@ -442,6 +444,7 @@ class FiscalAssistant:
         sources: list[str] | None,
         history_messages: list[dict[str, str]] | None = None,
         search_queries: list[str] | None = None,
+        recent_citations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.settings.openrouter_api_key:
             raise RuntimeError("OPENROUTER_API_KEY is not configured.")
@@ -478,7 +481,7 @@ class FiscalAssistant:
         legal_section = f"\n\n{legal_block}" if legal_block else ""
         state = load_state(self.settings.state_path)
         focused_reading = retriever.resolve_named_instrument_text(
-            question, state.get("documents", {}), extra_queries=search_queries
+            question, state.get("documents", {}), extra_queries=search_queries, recent_citations=recent_citations
         )
         focused_block = _focused_reading_block(focused_reading)
         focused_section = f"\n\n{focused_block}" if focused_block else ""

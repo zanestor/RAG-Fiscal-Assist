@@ -15,6 +15,18 @@ function isPublicDemo() {
   return window.location.hostname.endsWith("github.io") || new URLSearchParams(window.location.search).get("demo") === "1";
 }
 
+const CONVERSATION_ID_PATTERN = /^[a-f0-9]{32}$/;
+
+function conversationIdFromPath() {
+  const id = window.location.pathname.slice(1);
+  return CONVERSATION_ID_PATTERN.test(id) ? id : null;
+}
+
+function setConversationPath(conversationId) {
+  const path = conversationId ? `/${conversationId}` : "/";
+  if (window.location.pathname !== path) window.history.pushState({ conversationId }, "", path);
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   ["modelBadge", "connectionStatus", "documentCount", "indexMeter", "indexSummary", "sourceFilters",
     "toggleSources", "setupPanel", "setupTitle", "setupMessage", "setupSteps", "welcomePanel", "messages",
@@ -22,6 +34,12 @@ document.addEventListener("DOMContentLoaded", () => {
     "historyEmpty", "refreshHistory"].forEach((id) => { el[id] = document.getElementById(id); });
   bindEvents();
   loadStatus();
+});
+
+window.addEventListener("popstate", () => {
+  const conversationId = conversationIdFromPath();
+  if (conversationId) openConversation(conversationId, { updatePath: false });
+  else resetConversation({ updatePath: false });
 });
 
 function bindEvents() {
@@ -48,7 +66,20 @@ function bindEvents() {
   el.toggleSources.addEventListener("click", toggleAllSources);
   el.newChat.addEventListener("click", resetConversation);
   el.refreshHistory.addEventListener("click", loadHistory);
-  el.exportConversation.addEventListener("click", () => exportConversationToPDF(state.turns));
+  el.exportConversation.addEventListener("click", async () => {
+    if (el.exportConversation.disabled) return;
+    el.exportConversation.disabled = true;
+    el.exportConversation.setAttribute("aria-busy", "true");
+    try {
+      await exportConversationToPDF(state.turns);
+    } catch (error) {
+      console.error("PDF export failed", error);
+      addErrorMessage(`La génération du PDF a échoué (${error.message}).`);
+    } finally {
+      el.exportConversation.disabled = false;
+      el.exportConversation.removeAttribute("aria-busy");
+    }
+  });
 }
 
 function updateExportButton() {
@@ -66,6 +97,8 @@ async function loadStatus() {
     state.status = await response.json();
     renderStatus();
     loadHistory();
+    const conversationId = conversationIdFromPath();
+    if (conversationId) openConversation(conversationId, { updatePath: false });
   } catch (error) {
     el.connectionStatus.className = "connection-status error";
     el.connectionStatus.innerHTML = "<i></i> Serveur indisponible";
@@ -211,6 +244,7 @@ async function submitQuestion() {
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     thinking.remove();
     state.conversationId = payload.conversation_id || state.conversationId;
+    if (state.conversationId) setConversationPath(state.conversationId);
     // Keep any existing response id when a turn returns none (OpenRouter path
     // always returns null); only a real id from the OpenAI path should update it,
     // so a mid-conversation fallback never breaks the OpenAI continuation chain.
@@ -254,6 +288,7 @@ function addAssistantMessage(answer, citations, model) {
   meta.className = "answer-meta";
   meta.innerHTML = `<strong>Référence fiscale</strong><span>·</span><span>Réponse documentée</span>`;
   const text = renderMarkdown(answer);
+  wireCitationLinks(text, citations);
   content.append(meta, text);
 
   if (citations.length) {
@@ -296,6 +331,68 @@ function addAssistantMessage(answer, citations, model) {
   el.messages.append(message);
 }
 
+const CITATION_MATCH_STOPWORDS = new Set([
+  "du", "de", "la", "le", "et", "en", "un", "une", "des", "les", "aux", "sur", "par",
+  "ou", "au", "ce", "ces", "que", "qui", "son", "sa", "ses", "dans", "art", "page",
+]);
+
+function normalizeForCitationMatch(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function citationMatchTokens(value) {
+  return normalizeForCitationMatch(value)
+    .split(" ")
+    .filter((token) => token.length >= 3 && !CITATION_MATCH_STOPWORDS.has(token));
+}
+
+// Inline "[Document title, art. N, Page X]" references are free text the model
+// composes from the title/locator it was given - not a stable key - so matching
+// against the citation list is fuzzy: score each citation by how many of its
+// significant title/locator words appear in the inline reference, and only link
+// when a clear majority match, to avoid pointing a citation at the wrong document.
+function bestCitationMatch(referenceText, citations) {
+  const normalizedRef = normalizeForCitationMatch(referenceText);
+  let best = null;
+  let bestScore = 0;
+  citations.forEach((citation) => {
+    const candidates = [citation.title, ...(citation.locators || [])].filter(Boolean);
+    candidates.forEach((candidate) => {
+      const tokens = citationMatchTokens(candidate);
+      if (!tokens.length) return;
+      const matched = tokens.filter((token) => normalizedRef.includes(token)).length;
+      const score = matched / tokens.length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = citation;
+      }
+    });
+  });
+  return bestScore >= 0.5 ? best : null;
+}
+
+function wireCitationLinks(container, citations) {
+  if (!citations || !citations.length) return;
+  container.querySelectorAll(".citation-ref").forEach((span) => {
+    const referenceText = span.textContent.replace(/^\[|\]$/g, "");
+    const citation = bestCitationMatch(referenceText, citations);
+    if (!citation || !citation.pdf_url) return;
+    const link = document.createElement("a");
+    link.className = "citation-ref citation-ref-link";
+    link.href = citation.pdf_url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.title = `Ouvrir : ${citation.title}`;
+    link.textContent = span.textContent;
+    span.replaceWith(link);
+  });
+}
+
 function markdownToPlainText(markdown) {
   return String(markdown ?? "")
     .replace(/\r\n?/g, "\n")
@@ -312,6 +409,53 @@ function markdownToPlainText(markdown) {
     .join("\n");
 }
 
+const PDF_FONTS = Object.freeze({
+  body: "PublicSans",
+  display: "Spectral",
+  mono: "IBMPlexMono",
+});
+
+const PDF_FONT_ASSETS = Object.freeze([
+  { path: "fonts/PublicSans-Regular.ttf", fileName: "PublicSans-Regular.ttf", family: PDF_FONTS.body, style: "normal" },
+  { path: "fonts/PublicSans-Bold.ttf", fileName: "PublicSans-Bold.ttf", family: PDF_FONTS.body, style: "bold" },
+  { path: "fonts/PublicSans-Italic.ttf", fileName: "PublicSans-Italic.ttf", family: PDF_FONTS.body, style: "italic" },
+  { path: "fonts/Spectral-Bold.ttf", fileName: "Spectral-Bold.ttf", family: PDF_FONTS.display, style: "bold" },
+  { path: "fonts/IBMPlexMono-Medium.ttf", fileName: "IBMPlexMono-Medium.ttf", family: PDF_FONTS.mono, style: "normal" },
+]);
+
+let pdfFontAssetsPromise = null;
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function loadPdfFontAssets() {
+  if (!pdfFontAssetsPromise) {
+    pdfFontAssetsPromise = Promise.all(PDF_FONT_ASSETS.map(async (asset) => {
+      const response = await fetch(new URL(asset.path, document.baseURI), { cache: "force-cache" });
+      if (!response.ok) throw new Error(`police PDF indisponible : ${asset.fileName} (HTTP ${response.status})`);
+      return { ...asset, data: arrayBufferToBase64(await response.arrayBuffer()) };
+    })).catch((error) => {
+      pdfFontAssetsPromise = null;
+      throw error;
+    });
+  }
+  return pdfFontAssetsPromise;
+}
+
+function registerPdfFonts(doc, assets) {
+  assets.forEach((asset) => {
+    doc.addFileToVFS(asset.fileName, asset.data);
+    doc.addFont(asset.fileName, asset.family, asset.style);
+  });
+}
+
 // Generates a real PDF client-side (jsPDF) rather than relying on the browser's
 // print-to-PDF: that route only preserves clickable hyperlinks when the user
 // picks Chrome's own "Save as PDF" destination - picking "Microsoft Print to
@@ -322,7 +466,7 @@ function markdownToPlainText(markdown) {
 // single message: a multi-turn discussion loses its context if only the last
 // answer is captured, so this walks state.turns in order and gives every
 // turn its own question/answer/sources block in one combined document.
-function exportConversationToPDF(turns) {
+async function exportConversationToPDF(turns) {
   const { jsPDF } = window.jspdf || {};
   if (!jsPDF) {
     addErrorMessage("La génération du PDF a échoué : bibliothèque jsPDF introuvable.");
@@ -330,7 +474,9 @@ function exportConversationToPDF(turns) {
   }
   if (!turns.length) return;
 
-  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const fontAssets = await loadPdfFontAssets();
+  const doc = new jsPDF({ unit: "mm", format: "a4", putOnlyUsedFonts: true, compress: true });
+  registerPdfFonts(doc, fontAssets);
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const marginX = 20;
@@ -351,8 +497,8 @@ function exportConversationToPDF(turns) {
   // previous call) produces lines that are wider than the page once actually
   // drawn - the text runs past the right margin and is visibly cut off.
   const writeText = (text, options = {}) => {
-    const { fontSize, fontStyle = "normal", lineHeight, color = [17, 17, 17], link, spacingAfter = 0 } = options;
-    doc.setFont("helvetica", fontStyle);
+    const { fontSize, fontFamily = PDF_FONTS.body, fontStyle = "normal", lineHeight, color = [17, 17, 17], link, spacingAfter = 0 } = options;
+    doc.setFont(fontFamily, fontStyle);
     doc.setFontSize(fontSize);
     doc.setTextColor(...color);
     const lines = doc.splitTextToSize(text, maxWidth);
@@ -371,13 +517,41 @@ function exportConversationToPDF(turns) {
   const CITATION_REF_COLOR = [13, 81, 71];
   const CITATION_TOKEN_PATTERN = /\[[^\]\n]+\]/g;
 
+  // Shared by writeRichText() (paragraphs) and the table cell renderer below:
+  // splits text into words tagged with whether they fall inside a bare
+  // "[...]" citation reference, so both can color citations distinctly from
+  // surrounding prose using the same rule the chat view uses.
+  const tokenizeRichText = (text) => {
+    const segments = [];
+    let lastIndex = 0;
+    let match;
+    CITATION_TOKEN_PATTERN.lastIndex = 0;
+    while ((match = CITATION_TOKEN_PATTERN.exec(text)) !== null) {
+      if (match.index > lastIndex) segments.push({ text: text.slice(lastIndex, match.index), isCitation: false });
+      segments.push({ text: match[0], isCitation: true });
+      lastIndex = match.index + match[0].length;
+    }
+    if (lastIndex < text.length) segments.push({ text: text.slice(lastIndex), isCitation: false });
+    const tokens = [];
+    segments.forEach((segment) => {
+      segment.text.split(/(\s+)/).forEach((word) => {
+        if (word.length) tokens.push({ text: word, isCitation: segment.isCitation });
+      });
+    });
+    return tokens;
+  };
+
+  const setRichTextTokenFont = (token, fontFamily, fontStyle) => {
+    doc.setFont(token.isCitation ? PDF_FONTS.mono : fontFamily, token.isCitation ? "normal" : fontStyle);
+  };
+
   // writeText() colors a whole wrapped line uniformly, which can't set an
   // inline citation apart from the prose around it - this lays text out word
   // by word instead, switching color for tokens inside [...] while still
   // wrapping at maxWidth like a normal paragraph.
   const writeRichText = (text, options = {}) => {
-    const { fontSize, fontStyle = "normal", lineHeight, color = [17, 17, 17], spacingAfter = 0 } = options;
-    doc.setFont("helvetica", fontStyle);
+    const { fontSize, fontFamily = PDF_FONTS.body, fontStyle = "normal", lineHeight, color = [17, 17, 17], spacingAfter = 0 } = options;
+    doc.setFont(fontFamily, fontStyle);
     doc.setFontSize(fontSize);
 
     String(text ?? "").split("\n").forEach((paragraph) => {
@@ -386,33 +560,15 @@ function exportConversationToPDF(turns) {
         y += lineHeight;
         return;
       }
-      const segments = [];
-      let lastIndex = 0;
-      let match;
-      CITATION_TOKEN_PATTERN.lastIndex = 0;
-      while ((match = CITATION_TOKEN_PATTERN.exec(paragraph)) !== null) {
-        if (match.index > lastIndex) segments.push({ text: paragraph.slice(lastIndex, match.index), isCitation: false });
-        segments.push({ text: match[0], isCitation: true });
-        lastIndex = match.index + match[0].length;
-      }
-      if (lastIndex < paragraph.length) segments.push({ text: paragraph.slice(lastIndex), isCitation: false });
-
-      const tokens = [];
-      segments.forEach((segment) => {
-        segment.text.split(/(\s+)/).forEach((word) => {
-          if (word.length) tokens.push({ text: word, isCitation: segment.isCitation });
-        });
-      });
-
+      const tokens = tokenizeRichText(paragraph);
       let cursorX = marginX;
       ensureSpace(lineHeight);
       tokens.forEach((token) => {
         // Font MUST be set before measuring, same reasoning as writeText() above:
-        // bold glyphs are wider than normal ones, so measuring with whatever font
-        // was active from the previous token (rather than the one this token will
-        // actually be drawn in) understates a citation token's width and makes it
-        // visibly crowd into whatever follows it.
-        doc.setFont("helvetica", token.isCitation ? "bold" : fontStyle);
+        // citation glyphs use IBM Plex Mono while prose uses Public Sans, so
+        // measuring with whichever font was active for the previous token would
+        // make the citation visibly crowd into whatever follows it.
+        setRichTextTokenFont(token, fontFamily, fontStyle);
         const width = doc.getTextWidth(token.text);
         if (token.text.trim() && cursorX + width > marginX + maxWidth) {
           cursorX = marginX;
@@ -430,9 +586,123 @@ function exportConversationToPDF(turns) {
     y += spacingAfter;
   };
 
-  writeText("Référence Fiscale RDC", { fontSize: 18, fontStyle: "bold", lineHeight: 7, color: [13, 81, 71] });
+  // Wraps citation-aware tokens into lines that each fit boxWidth, given the
+  // font size/style already active on doc. Pure layout (no drawing) so the
+  // table renderer can measure every cell's row height before committing to
+  // a page-break decision.
+  const wrapTokensToWidth = (tokens, boxWidth, fontFamily, fontStyle) => {
+    const lines = [];
+    let current = [];
+    let cursorWidth = 0;
+    tokens.forEach((token) => {
+      setRichTextTokenFont(token, fontFamily, fontStyle);
+      const width = doc.getTextWidth(token.text);
+      const isSpace = !token.text.trim();
+      // Never start a wrapped line with a leading space, but otherwise keep
+      // space tokens in the line (with their width) same as writeRichText()
+      // does - drawTokenLines() below relies on that gap actually being
+      // present to separate words when it draws them.
+      if (isSpace && current.length === 0) return;
+      if (!isSpace && current.length > 0 && cursorWidth + width > boxWidth) {
+        lines.push(current);
+        current = [];
+        cursorWidth = 0;
+      }
+      current.push({ ...token, width });
+      cursorWidth += width;
+    });
+    if (current.length) lines.push(current);
+    return lines;
+  };
+
+  // Draws pre-wrapped citation-aware lines starting at (x, y), honoring cell
+  // alignment; returns nothing, just advances the caller's own y bookkeeping
+  // (the table renderer tracks row height itself, since every cell in a row
+  // must share one row height regardless of which cell is tallest).
+  const drawTokenLines = (lines, x, boxWidth, startY, lineHeight, align, fontFamily, fontStyle, color) => {
+    lines.forEach((line, lineIndex) => {
+      const lineWidth = line.reduce((sum, token) => sum + token.width, 0);
+      let cursorX = x;
+      if (align === "center") cursorX = x + (boxWidth - lineWidth) / 2;
+      else if (align === "right") cursorX = x + boxWidth - lineWidth;
+      line.forEach((token) => {
+        setRichTextTokenFont(token, fontFamily, fontStyle);
+        doc.setTextColor(...(token.isCitation ? CITATION_REF_COLOR : color));
+        doc.text(token.text, cursorX, startY + lineIndex * lineHeight);
+        cursorX += token.width;
+      });
+    });
+  };
+
+  // Renders a markdown table block as an actual bordered/shaded table,
+  // matching the chat view's .markdown-body table styling (dark green header,
+  // zebra-striped rows) rather than leaving raw "| a | b |" pipe syntax in
+  // the exported text, which is unreadable outside a markdown renderer.
+  const writeMarkdownTable = (table, options = {}) => {
+    const { fontSize = 8.5, lineHeight = 3.6, spacingAfter = 6 } = options;
+    const columns = table.headers.length;
+    if (!columns) return;
+    const cellPaddingX = 2;
+    const cellPaddingY = 1.6;
+    const colWidth = maxWidth / columns;
+    const HEADER_FILL = [13, 81, 71];
+    const HEADER_TEXT = [255, 255, 255];
+    const ZEBRA_FILL = [230, 240, 235];
+    const BODY_TEXT = [40, 40, 40];
+    const BORDER_COLOR = [214, 224, 218];
+
+    doc.setFontSize(fontSize);
+    const layoutRow = (cells, fontFamily, fontStyle) =>
+      cells.map((cellText, cellIndex) => {
+        const plain = markdownToPlainText(cellText || "").replace(/\n/g, " ");
+        const tokens = tokenizeRichText(plain);
+        const lines = wrapTokensToWidth(tokens, colWidth - cellPaddingX * 2, fontFamily, fontStyle);
+        return { lines: lines.length ? lines : [[]], align: table.alignments[cellIndex] || "left" };
+      });
+
+    const drawRow = (cells, rowFill, fontFamily, fontStyle, textColor) => {
+      const rowHeight = Math.max(...cells.map((cell) => cell.lines.length)) * lineHeight + cellPaddingY * 2;
+      ensureSpace(rowHeight);
+      if (rowFill) {
+        doc.setFillColor(...rowFill);
+        doc.rect(marginX, y, maxWidth, rowHeight, "F");
+      }
+      doc.setDrawColor(...BORDER_COLOR);
+      cells.forEach((cell, cellIndex) => {
+        const cellX = marginX + cellIndex * colWidth;
+        doc.rect(cellX, y, colWidth, rowHeight);
+        drawTokenLines(
+          cell.lines, cellX + cellPaddingX, colWidth - cellPaddingX * 2,
+          y + cellPaddingY + lineHeight * 0.8, lineHeight, cell.align, fontFamily, fontStyle, textColor
+        );
+      });
+      y += rowHeight;
+      return rowHeight;
+    };
+
+    const headerCells = layoutRow(table.headers, PDF_FONTS.mono, "normal");
+    ensureSpace(Math.max(...headerCells.map((cell) => cell.lines.length)) * lineHeight + cellPaddingY * 2 + 4);
+    drawRow(headerCells, HEADER_FILL, PDF_FONTS.mono, "normal", HEADER_TEXT);
+
+    table.rows.forEach((row, rowIndex) => {
+      const bodyCells = layoutRow(table.headers.map((_, cellIndex) => row[cellIndex] ?? ""), PDF_FONTS.body, "normal");
+      const rowHeight = Math.max(...bodyCells.map((cell) => cell.lines.length)) * lineHeight + cellPaddingY * 2;
+      // ensureSpace() alone would silently start a new page mid-table with no
+      // header - repeat it here so a table split across pages stays readable.
+      if (y + rowHeight > bottomLimit) {
+        doc.addPage();
+        y = 20;
+        drawRow(headerCells, HEADER_FILL, PDF_FONTS.mono, "normal", HEADER_TEXT);
+      }
+      drawRow(bodyCells, rowIndex % 2 === 1 ? ZEBRA_FILL : null, PDF_FONTS.body, "normal", BODY_TEXT);
+    });
+
+    y += spacingAfter;
+  };
+
+  writeText("Référence Fiscale RDC", { fontSize: 18, fontFamily: PDF_FONTS.display, fontStyle: "bold", lineHeight: 7, color: [13, 81, 71] });
   const generatedAt = new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeStyle: "short" }).format(new Date());
-  writeText(`Conversation exportée le ${generatedAt} · ${turns.length} échange(s)`, { fontSize: 9, lineHeight: 5, color: [90, 90, 90], spacingAfter: 8 });
+  writeText(`Conversation exportée le ${generatedAt} · ${turns.length} échange(s)`, { fontSize: 9, fontFamily: PDF_FONTS.mono, lineHeight: 5, color: [90, 90, 90], spacingAfter: 8 });
 
   turns.forEach((turn, turnIndex) => {
     if (turnIndex > 0) {
@@ -442,15 +712,34 @@ function exportConversationToPDF(turns) {
       y += 8;
     }
 
-    writeText(`Question ${turnIndex + 1}`, { fontSize: 8, fontStyle: "bold", lineHeight: 4, color: [36, 116, 102], spacingAfter: 1 });
+    writeText(`Question ${turnIndex + 1}`, { fontSize: 8, fontFamily: PDF_FONTS.mono, lineHeight: 4, color: [36, 116, 102], spacingAfter: 1 });
     writeText(turn.question || "", { fontSize: 11, fontStyle: "bold", lineHeight: 5.5, spacingAfter: 6 });
 
-    writeRichText(markdownToPlainText(turn.answer), { fontSize: 10.5, lineHeight: 5.2, spacingAfter: 8 });
+    splitMarkdownIntoBlocks(turn.answer).forEach((block) => {
+      if (block.type === "table") {
+        writeMarkdownTable(block);
+      } else if (block.type === "heading") {
+        const fontSize = block.level === 2 ? 15 : block.level === 3 ? 13 : 12;
+        writeText(markdownToPlainText(block.content), {
+          fontSize,
+          fontFamily: PDF_FONTS.display,
+          fontStyle: "bold",
+          lineHeight: fontSize * 0.48,
+          color: [13, 81, 71],
+          spacingAfter: 2,
+        });
+      } else if (block.type === "code") {
+        writeText(block.content, { fontSize: 9, fontFamily: PDF_FONTS.mono, lineHeight: 4.6, color: [23, 60, 53], spacingAfter: 4 });
+      } else {
+        writeRichText(markdownToPlainText(block.content), { fontSize: 10.5, lineHeight: 5.2, spacingAfter: 4 });
+      }
+    });
+    y += 4;
 
     const citations = turn.citations || [];
     if (citations.length) {
       ensureSpace(10);
-      writeText("Sources citées", { fontSize: 12, fontStyle: "bold", lineHeight: 6, color: [13, 81, 71], spacingAfter: 4 });
+      writeText("Sources citées", { fontSize: 12, fontFamily: PDF_FONTS.display, fontStyle: "bold", lineHeight: 6, color: [13, 81, 71], spacingAfter: 4 });
 
       citations.forEach((citation, index) => {
         writeText(`${index + 1}. ${citation.title || ""}`, { fontSize: 10, fontStyle: "bold", lineHeight: 5 });
@@ -463,7 +752,7 @@ function exportConversationToPDF(turns) {
         // still resolve there. When no online URL exists, say so rather than
         // silently linking to the local route.
         if (citation.source_url) {
-          writeText(citation.source_url, { fontSize: 9, lineHeight: 5, color: [13, 81, 71], link: citation.source_url });
+          writeText(citation.source_url, { fontSize: 9, fontFamily: PDF_FONTS.mono, lineHeight: 5, color: [13, 81, 71], link: citation.source_url });
         } else {
           writeText("Aucune URL en ligne disponible pour cette source.", { fontSize: 9, fontStyle: "italic", lineHeight: 5, color: [140, 140, 140] });
         }
@@ -486,7 +775,7 @@ function exportConversationToPDF(turns) {
   const footerY = pageHeight - 10;
   for (let page = 1; page <= totalPages; page++) {
     doc.setPage(page);
-    doc.setFont("helvetica", "normal");
+    doc.setFont(PDF_FONTS.mono, "normal");
     doc.setFontSize(7.5);
     doc.setTextColor(150, 150, 150);
     doc.text("© PivotIQ Solutions · par Nestor Cirhuza Muderhwa · nestor@muderhwa.com", marginX, footerY);
@@ -554,6 +843,75 @@ function parseTableRow(line) {
   if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
   if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
   return trimmed.split("|").map((cell) => cell.trim());
+}
+
+// Splits the answer into the same typography roles used in the chat view:
+// Spectral headings, IBM Plex Mono code/table headers, Public Sans prose, and
+// real table structures instead of raw "| a | b |" pipe syntax.
+function splitMarkdownIntoBlocks(markdown) {
+  const lines = String(markdown ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let buffer = [];
+  let codeBuffer = null;
+  const flush = () => {
+    if (buffer.length) {
+      blocks.push({ type: "text", content: buffer.join("\n") });
+      buffer = [];
+    }
+  };
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (codeBuffer !== null) {
+      if (/^\s*```/.test(line)) {
+        blocks.push({ type: "code", content: codeBuffer.join("\n") });
+        codeBuffer = null;
+      } else {
+        codeBuffer.push(line);
+      }
+      continue;
+    }
+    if (/^\s*```/.test(line)) {
+      flush();
+      codeBuffer = [];
+      continue;
+    }
+    if (
+      line.includes("|") &&
+      index + 1 < lines.length &&
+      lines[index + 1].includes("|") &&
+      TABLE_SEPARATOR_PATTERN.test(lines[index + 1])
+    ) {
+      flush();
+      const headerCells = parseTableRow(line);
+      const alignments = parseTableRow(lines[index + 1]).map((cell) => {
+        const left = cell.startsWith(":");
+        const right = cell.endsWith(":");
+        if (left && right) return "center";
+        if (right) return "right";
+        if (left) return "left";
+        return "left";
+      });
+      let rowIndex = index + 2;
+      const bodyRows = [];
+      while (rowIndex < lines.length && lines[rowIndex].includes("|") && lines[rowIndex].trim()) {
+        bodyRows.push(parseTableRow(lines[rowIndex]));
+        rowIndex++;
+      }
+      blocks.push({ type: "table", headers: headerCells, alignments, rows: bodyRows });
+      index = rowIndex - 1;
+      continue;
+    }
+    const heading = line.match(/^\s*(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flush();
+      blocks.push({ type: "heading", level: Math.min(heading[1].length + 1, 4), content: heading[2] });
+      continue;
+    }
+    buffer.push(line);
+  }
+  if (codeBuffer !== null) blocks.push({ type: "code", content: codeBuffer.join("\n") });
+  flush();
+  return blocks;
 }
 
 function renderMarkdown(markdown) {
@@ -722,7 +1080,7 @@ function addErrorMessage(error) {
   el.messages.append(message);
 }
 
-function resetConversation() {
+function resetConversation({ updatePath = true } = {}) {
   state.conversationId = null;
   state.previousResponseId = null;
   state.turns = [];
@@ -732,6 +1090,7 @@ function resetConversation() {
   el.questionInput.value = "";
   autoResize();
   el.questionInput.focus();
+  if (updatePath) setConversationPath(null);
 }
 
 async function loadHistory() {
@@ -781,12 +1140,13 @@ function renderHistory(conversations) {
   }));
 }
 
-async function openConversation(conversationId) {
+async function openConversation(conversationId, { updatePath = true } = {}) {
   try {
     const response = await fetch(`/api/history/${conversationId}`, { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     state.conversationId = conversationId;
+    if (updatePath) setConversationPath(conversationId);
     state.previousResponseId = null;
     el.messages.replaceChildren();
     state.turns = [];
