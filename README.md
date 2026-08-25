@@ -29,6 +29,27 @@ page, and original-source citations.
 
 <p align="center"><sub>Public preview mode — no corpus, database, or API credentials are exposed.</sub></p>
 
+## From a suggested question to a cited result
+
+Selecting **“Obligations d’une ASBL — Impôts, déclarations et pièces
+justificatives”** submits the example question and replaces the welcome panel
+with a structured answer. Citations remain visually attached to the claims
+they support.
+
+![Example answer for the ASBL obligations suggestion](docs/assets/asbl-answer-example.png)
+
+### References and verification summary
+
+At the end of the response, the assistant displays its verification card and
+the complete list of references used for the answer.
+
+![Verification summary and twelve references cited for the ASBL example](docs/assets/asbl-citations-example.png)
+
+> [!NOTE]
+> This example was captured from the private development index on 25 August
+> 2026. It demonstrates the interface and citation flow; fiscal applicability
+> and legal force must still be verified for the entity and date concerned.
+
 ## Why this exists
 
 Fiscal and legal research in the DRC means cross-referencing Journaux
